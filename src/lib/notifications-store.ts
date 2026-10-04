@@ -101,22 +101,42 @@ function toNotif(id: string, raw: Record<string, unknown>): Notif {
 // --------------------------------------------------- device notifications
 //
 // Social events mirror into the Android notification shade like Instagram or
-// WhatsApp: "Majid sent you a message: hii". Three guards keep this honest and
-// quiet:
-//   1. FRESH  — only documents stamped within the last 90s. On every listener
-//               (re)attach the full unread history replays; without this stamp
-//               each app start would re-post every old notification.
+// WhatsApp: "Majid sent you a message: hii". Guards keep this honest and quiet:
+//   1. FRESH  — events stamped within the last 90s post individually while the
+//               app is hidden (the classic live case).
 //   2. NEW    — session-scoped seen-set, so the same Firestore doc never pops
 //               twice even across snapshot re-emissions.
-//   3. GONE   — only while the app is NOT visible. Foreground users see the
-//               event in-app; a heads-up on top of the open app is noise.
-// (A killed process cannot post: real push for that needs FCM + a server.)
+//   3. GONE   — only while the app is NOT visible for the individual post.
+//   4. CATCH-UP — a persistent per-account watermark records the newest event
+//               this device has already seen. OEM freezer (XOS and friends)
+//               kills the listener within seconds of backgrounding, so events
+//               that land while frozen would otherwise be discarded by the
+//               90s rule forever. On the next listener attach everything after
+//               the watermark that missed the live window is posted as ONE
+//               summary notification instead of vanishing silently.
+// (A killed process still cannot post: real push for that needs FCM + a server.)
 
 const DEVICE_FRESH_MS = 90_000;
 const seenOnDevice = new Set<string>();
 
 function appVisible(): boolean {
   return typeof document !== "undefined" && document.visibilityState === "visible";
+}
+
+function readWatermark(uid: string): number {
+  try {
+    return Number(localStorage.getItem(`chatz.notifWm.${uid}`) || 0) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeWatermark(uid: string, ts: number) {
+  try {
+    localStorage.setItem(`chatz.notifWm.${uid}`, String(ts));
+  } catch {
+    /* private mode: catch-up degrades to per-session only */
+  }
 }
 
 function postDeviceNotification(n: Notif) {
@@ -128,6 +148,53 @@ function postDeviceNotification(n: Notif) {
     body: n.text,
     channel,
   }).catch(() => {});
+}
+
+/** One consolidated notification for events that arrived while frozen. */
+function postCatchup(missed: Notif[]) {
+  if (!Capacitor.isNativePlatform() || missed.length === 0) return;
+  const newest = missed[missed.length - 1]; // caller passes oldest-first
+  const body =
+    missed.length === 1
+      ? `${newest.fromName} ${newest.text}`
+      : `${missed.length} new since you last checked — latest: ${newest.fromName} ${newest.text}`;
+  VibeStats.notify({
+    id: `catchup-${newest.createdAt}`,
+    title: "ChatZ",
+    body,
+    channel: newest.kind === "message" ? "message" : "social",
+  }).catch(() => {});
+}
+
+/**
+ * Runs on every listener emission. `items` is oldest-first (the hook reverses
+ * the desc query), so the newest event is last.
+ */
+function deviceNotify(items: Notif[], uid: string) {
+  const now = Date.now();
+  const wm = readWatermark(uid);
+
+  // Live pass: brand-new events while the app is hidden.
+  for (const n of items) {
+    if (seenOnDevice.has(n.id)) continue;
+    seenOnDevice.add(n.id);
+    if (n.read) continue;
+    if (!n.createdAt || now - n.createdAt > DEVICE_FRESH_MS) continue;
+    if (appVisible()) continue;
+    postDeviceNotification(n);
+  }
+
+  // Catch-up pass: unread events after the watermark that already missed the
+  // live window (frozen listener). Only on the first emission of this session,
+  // because the watermark advance below makes later ones empty by construction.
+  const missed = items.filter((n) => {
+    const t = n.createdAt ?? 0;
+    return !n.read && t > wm && now - t > DEVICE_FRESH_MS;
+  });
+  if (missed.length > 0) postCatchup(missed);
+
+  const maxTs = items.reduce((m, n) => Math.max(m, n.createdAt || 0), wm);
+  if (maxTs !== wm) writeWatermark(uid, maxTs);
 }
 
 export function useNotifs() {
@@ -164,19 +231,12 @@ export function useNotifs() {
           const items = snap.docs
             .filter((d) => !isExpired(d.data().expiresAt))
             .map((d) => toNotif(d.id, d.data()));
-          // Already sorted by createdAt desc from the query — reverse for display (newest first).
+          // Already sorted by createdAt desc from the query — reversed to
+          // oldest-first so the newest event is last.
           items.reverse();
 
-          // Device shade: unread, brand-new, and the app is in the background.
-          const now = Date.now();
-          for (const n of items) {
-            if (seenOnDevice.has(n.id)) continue;
-            seenOnDevice.add(n.id);
-            if (n.read) continue;
-            if (!n.createdAt || now - n.createdAt > DEVICE_FRESH_MS) continue;
-            if (appVisible()) continue;
-            postDeviceNotification(n);
-          }
+          // Device shade: live posts, frozen-gap catch-up, watermark advance.
+          deviceNotify(items, u.uid);
 
           latest = items;
           setList(items);
