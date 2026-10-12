@@ -94,6 +94,12 @@ export interface VibeStatsPlugin {
     body: string;
     channel?: "message" | "social";
   }): Promise<{ shown: boolean; reason?: string }>;
+  /**
+   * FCM registration token for this device, or "" when messaging is
+   * unavailable. The JS layer stores it on the user doc so the chatz-push
+   * Worker can reach the device when this app's process is frozen or killed.
+   */
+  getFcmToken(): Promise<{ token: string }>;
 }
 
 const VibeStats = registerPlugin<VibeStatsPlugin>("VibeStats", {

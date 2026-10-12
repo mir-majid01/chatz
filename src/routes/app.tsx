@@ -23,6 +23,7 @@ import {
   type UpdateInfo,
 } from "@/lib/update-repo";
 import { claimStarterFrame } from "@/lib/frames-repo";
+import { registerFcmToken } from "@/lib/push-repo";
 
 export const Route = createFileRoute("/app")({
   component: AppShell,
@@ -434,6 +435,23 @@ function AppShell() {
       sub.then((h) => h.remove()).catch(() => {});
     };
   }, [ready]);
+
+  // The push address. Firestore needs this device's FCM token before the
+  // chatz-push Worker can reach a user whose app is frozen or killed — without
+  // it they only ever get the in-app listener and the catch-up summary.
+  // Re-checked on resume, which is also how a rotated token gets published.
+  useEffect(() => {
+    if (!ready || !presenceUid || !Capacitor.isNativePlatform()) return;
+    registerFcmToken(presenceUid).catch(() => {});
+    let alive = true;
+    const sub = NativeApp.addListener("appStateChange", ({ isActive }) => {
+      if (isActive && alive) registerFcmToken(presenceUid).catch(() => {});
+    });
+    return () => {
+      alive = false;
+      sub.then((h) => h.remove()).catch(() => {});
+    };
+  }, [ready, presenceUid]);
 
   // The Friends tab carries one dot for either signal: an unread DM or a
   // pending friend request.

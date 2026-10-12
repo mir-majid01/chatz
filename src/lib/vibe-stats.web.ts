@@ -106,4 +106,8 @@ export class VibeStatsWeb implements VibeStatsPlugin {
     // stays silent so previews never pop OS notifications.
     return { shown: false, reason: "unsupported" };
   }
+
+  async getFcmToken(): Promise<{ token: string }> {
+    return { token: "" };
+  }
 }

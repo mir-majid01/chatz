@@ -33,6 +33,7 @@ import {
   type ActorInfo,
 } from "./friends-repo";
 import { notifPayload } from "./notifications-store";
+import { triggerPush } from "./push-repo";
 
 const BLOCKS = "blocks";
 
@@ -159,8 +160,9 @@ export async function blockUser(
     });
   }
 
+  const notifRef = doc(collection(db, "notifications"));
   batch.set(
-    doc(collection(db, "notifications")),
+    notifRef,
     notifPayload(
       {
         toUid: targetUid,
@@ -176,6 +178,7 @@ export async function blockUser(
     ),
   );
   await batch.commit();
+  triggerPush(notifRef.id);
 }
 
 /**

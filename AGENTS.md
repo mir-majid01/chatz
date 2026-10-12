@@ -163,7 +163,7 @@ Rules that follow from this:
 | Path | Shape | Written by |
 |------|-------|-----------|
 | `users/{uid}` | `{ name, nameLower, handle, handleLower, color, avatarId, goalHours, theme, accent, bio, socials, discoverable, profileCompleted, createdAt, updatedAt }` | Onboarding + profile edits |
-| `users/{uid}/private/data` | `{ email, dob, education, firstName, lastName, privacy, mode }` — private fields (owner-only); `privacy` is the sharing map, `mode` is `active`/`silent` | Owner only |
+| `users/{uid}/private/data` | `{ email, dob, education, firstName, lastName, privacy, mode, fcmToken }` — private fields (owner-only); `privacy` is the sharing map, `mode` is `active`/`silent`, `fcmToken` is this device's push address (read by the Worker with admin credentials) | Owner only |
 | `users/{uid}/private/prefs` | `{ notifPrefs: { reaction, comment } }` — per-kind notification feed filters | Owner only |
 | `handles/{handleLower}` | `{ uid, createdAt }` — the uniqueness lock. The document ID *is* the reservation; losing the create race means the handle is taken | Handle claim transaction |
 | `friendRequests/{senderUid}_{receiverUid}` | `{ senderId, receiverId, status, createdAt, updatedAt }` with status ∈ `pending / accepted / rejected / cancelled` | Sender creates; receiver accepts/rejects; sender may cancel and may re-request |
@@ -173,7 +173,7 @@ Rules that follow from this:
 | `chats/{pairId}/messages/{id}` | `{ fromUid, text, createdAt: serverTimestamp, clientAt: epoch ms }` — `createdAt` is authoritative (rules require `== request.time`); `clientAt` only orders pending writes locally | `sendDm` |
 | `statPosts/{ownerUid}_{day}/reactions/{reactorUid}` | `{ uid, emoji, createdAt, expiresAt }` — ASCII emoji keys, one reaction per person (doc id = reactor uid), 24h TTL | `setReaction` |
 | `statPosts/{ownerUid}_{day}/comments/{id}` | `{ authorUid, authorName, authorHandle, authorColor, authorAvatarId?, text, parentId, createdAt, expiresAt }` — threaded via `parentId`, 24h TTL | `addComment` |
-| `notifications/{autoId}` | `{ toUid, fromUid, fromName, fromColor, fromHandle?, fromAvatarId?, kind, text, link, read, createdAt, expiresAt }` — kind ∈ `reaction / comment / message / friend_request / group_invite / mention / unfriend / block`; create rules tie `unfriend`/`block` kinds to the relationship change in the same batch | `pushNotif` + relationship batches |
+| `notifications/{autoId}` | `{ toUid, fromUid, fromName, fromColor, fromHandle?, fromAvatarId?, kind, text, link, read, createdAt, expiresAt, pushedAt? }` — kind ∈ `reaction / comment / message / friend_request / group_invite / mention / unfriend / block`; create rules tie `unfriend`/`block` kinds to the relationship change in the same batch. `pushedAt` is written by the push Worker, never by a client | `pushNotif` + relationship batches; `pushedAt` by the Worker |
 | `blocks/{blockerUid}_{blockedUid}` | `{ blockerUid, blockedUid, blockedName, blockedHandle, blockedColor, blockedAvatarId, createdAt }` — denormalized display fields so the blocked list never reads the blocked profile | `blockUser` (batch: block + unfriend + cancel requests + notification) |
 | `reports/{autoId}` | `{ reporterUid, reportedUid, reason, details, createdAt }` — write-only: no read/update/delete for anyone | `reportUser` |
 | `usageStats/{uid}` | The latest snapshot: screen time, top apps, data, battery, Wi-Fi **plus `shared` (per-category flags) and `mode` (`active`/`silent`)**. Gated categories are zeroed at write time; `mode:"silent"` documents are fully neutral so friends show "Stats sharing is paused" | Native WorkManager worker (owner only) + `pushUsageSnapshot` on privacy/mode changes |
@@ -254,6 +254,7 @@ Registered in `MainActivity.java`, implemented in `VibeStatsPlugin.kt`, typed in
 | `openSettings({ action })` | Opens a specific settings screen |
 | `setPrivacySettings({...})` | Persists **per-uid** privacy toggles + mode to SharedPreferences for the worker (fail-closed: the worker skips an account with no privacy record) |
 | `notify({ id, title, body, channel })` | Posts a system notification (`chatz_messages` heads-up channel or `chatz_social` default channel); resolves `{ shown: false, reason: "permission" }` instead of throwing when POST_NOTIFICATIONS is off |
+| `getFcmToken()` | The device's FCM registration token (`""` when messaging is unavailable), which `push-repo.ts` stores on `users/{uid}/private/data` so the push Worker has an address. `ChatzPushService` is the receiving `FirebaseMessagingService` |
 | `adoptExistingSession({ uid, email })` | Mirrors the WebView's Firebase session onto the native SDK via `silentSignIn()` |
 | `getNativeAuthUid()` | UID of the native Firebase session (empty when none) |
 | `signOutNative()` | Signs out the native Firebase instance (called by `signOutEverywhere`) |
@@ -337,8 +338,8 @@ Firestore has no substring search. Typing mid-word fragments returns nothing unt
 ### 5. Groups are local-only (prototype)
 `groups-store.ts` persists local group chats to localStorage (per-account keys, so two logins on one device never blend). Real 1:1 DMs, notifications, reactions and comments **are** Firestore-backed and sync across devices. Local groups do not sync and reinstalling loses them.
 
-### 6. Device notifications need the process alive
-The social → system-notification mirror (`VibeStats.notify`, driven by the Firestore notifications listener) fires while the app process is alive — backgrounded but not frozen/killed. Android 12+ freezes cached apps on aggressive OEMs, and a killed process has no listener. True killed-process push needs FCM + a Cloud Function (Blaze plan) — deliberate future work, not a bug.
+### 6. Device notifications: two delivery paths, same event
+The in-app path (`notifications-store.ts` → `VibeStats.notify`) mirrors Firestore notifications into the shade while the process is alive, with a persistent watermark that turns events missed during an OEM freeze into one catch-up summary on the next listener attach. The push path (v2.0+) covers what no client-side code can: a killed process. The sender pings the `chatz-push` Cloudflare Worker, which reads the payload from Firestore itself and sends one data-only FCM message to the recipient's registered token. `pushedAt` on the doc is both the dedupe marker and the signal that stops the recipient's own listener from posting a second notification.
 
 ### 7. Large JS bundle
 The single app chunk is ~940 KB (approx. 280 KB gzipped), mostly Firebase + React + router. Code-splitting via dynamic imports is the obvious next step if startup cost matters.
@@ -399,7 +400,8 @@ New native `VibeStats.notify({ id, title, body, channel })` in `VibeStatsPlugin.
 
 JS side (`notifications-store.ts`, inside the Firestore `useNotifs` listener) posts with three guards (see invariant 7): **unread only**, **fresh** (`createdAt` within 90s — listener re-attaches must not replay history), **app not visible** (`document.visibilityState`) — foreground users see the event in-app, like Instagram/WhatsApp. Web fallback no-ops. Wired for all kinds: messages ("Majid sent you a message: hii"), reactions, comments, friend requests, unfriend/block.
 
-Known limit (Known Issues #6): needs the process alive; killed-process push = FCM + Cloud Functions, future work.
+Known limit (was Known Issues #6 until v2.0): needed the process alive. Killed-process push is now the `chatz-push` Worker + FCM path described there.
+
 
 ### CL-11 · Friends refresh — circular animation
 The Pulse friends-refresh button now shows a proper circular ring spinner (`border-2 border-primary/25 border-t-primary animate-spin`) instead of a spinning icon, and `refreshFriends` enforces a **≥650 ms** visible duration so cache-hit refreshes (near-instant `getDocFromServer`) still animate.
@@ -417,11 +419,16 @@ An earlier pass over the previous architecture (Supabase + news feed + weather +
 
 The Firebase API key is a public client identifier, not a secret — access is controlled entirely by Firestore Security Rules and Firebase Auth. Do **not** add service-account keys, Google OAuth client secrets, or any other server-side credential to this repository. Authentication tokens must never be logged or written to Firestore.
 
+The push bridge's credential (`chatz-push` service-account JSON) lives **only** as a Cloudflare Worker secret named `SA_JSON`, set with `wrangler secret put SA_JSON < keyfile`. It is never in this repo, in `push-worker/`, in the APK, or in Firestore. `push-worker/wrangler.jsonc` holds only the Worker name and config.
+
+### Push Worker (`push-worker/`)
+Deployed to `https://chatz-push.chatz-app.workers.dev`. The app's `src/lib/push-repo.ts` holds the URL and both halves of the contract: `registerFcmToken(uid)` and `triggerPush(notifId)`. The Worker treats Firestore as the payload authority — a ping carries only a document id, so a caller can never forge notification text — and needs the Firebase Cloud Messaging Send API enabled on `dropscope-b588a`. Redeploy after editing: `cd push-worker && npx wrangler deploy`.
+
 ## Build Dependencies (Android)
 
 - Kotlin stdlib + coroutines 1.9.0
 - WorkManager 2.10.0 (`work-runtime-ktx`)
 - Lifecycle ViewModel KTX 2.8.7
-- Firebase BOM 33.12.0 → `firebase-auth`, `firebase-firestore`
+- Firebase BOM 33.12.0 → `firebase-auth`, `firebase-firestore`, `firebase-messaging` (the `chatz-push` Worker's delivery target)
 - Google Play Services Auth 21.2.0
 - Capacitor 7 (app, splash-screen, status-bar)

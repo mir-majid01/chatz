@@ -23,6 +23,7 @@ import {
 } from "firebase/firestore";
 import { auth, db } from "./firebase";
 import { expiresAt24h, isExpired } from "./ttl";
+import { triggerPush } from "./push-repo";
 import { VibeStats } from "./vibe-stats";
 
 export type NotifKind =
@@ -49,6 +50,8 @@ export type Notif = {
   read: boolean;
   link?: string; // route to navigate to
   createdAt?: number; // epoch ms, for grouping/sorting
+  /** The Worker already delivered this to the device shade — do not post again. */
+  pushed?: boolean;
 };
 
 /** What a sender provides when pushing a notification. */
@@ -95,6 +98,7 @@ function toNotif(id: string, raw: Record<string, unknown>): Notif {
     read: raw.read === true,
     link: typeof raw.link === "string" ? raw.link : undefined,
     createdAt,
+    pushed: raw.pushedAt != null,
   };
 }
 
@@ -114,9 +118,15 @@ function toNotif(id: string, raw: Record<string, unknown>): Notif {
 //               90s rule forever. On the next listener attach everything after
 //               the watermark that missed the live window is posted as ONE
 //               summary notification instead of vanishing silently.
-// (A killed process still cannot post: real push for that needs FCM + a server.)
+//   5. PUSHED — once the chatz-push Worker delivers a notification over FCM it
+//               stamps pushedAt on the doc, and this code leaves that event
+//               alone: the shade already has it, and the recipient may be
+//               frozen for hours or never open the app again.
+// Push covers what this layer structurally cannot: a killed process. The two
+// paths are the same event once, decided by which one got there first.
 
 const DEVICE_FRESH_MS = 90_000;
+const PUSH_GRACE_MS = 1_500;
 const seenOnDevice = new Set<string>();
 
 function appVisible(): boolean {
@@ -150,6 +160,24 @@ function postDeviceNotification(n: Notif) {
   }).catch(() => {});
 }
 
+/**
+ * Post after a short grace period so the push path wins when it exists.
+ *
+ * The Worker stamps `pushedAt` right after FCM accepts the message, and that
+ * write reaches this listener a beat after the document itself. Waiting lets the
+ * stamp arrive first: if it did, the shade already has the event. (Even if the
+ * timing loses, both paths hash the same notification id to the same Android
+ * notification id, so the second post replaces the first instead of stacking.)
+ */
+function scheduleDevicePost(n: Notif) {
+  window.setTimeout(() => {
+    const cur = latest.find((x) => x.id === n.id);
+    if (!cur || cur.read || cur.pushed) return;
+    if (appVisible()) return;
+    postDeviceNotification(n);
+  }, PUSH_GRACE_MS);
+}
+
 /** One consolidated notification for events that arrived while frozen. */
 function postCatchup(missed: Notif[]) {
   if (!Capacitor.isNativePlatform() || missed.length === 0) return;
@@ -178,10 +206,10 @@ function deviceNotify(items: Notif[], uid: string) {
   for (const n of items) {
     if (seenOnDevice.has(n.id)) continue;
     seenOnDevice.add(n.id);
-    if (n.read) continue;
+    if (n.read || n.pushed) continue;
     if (!n.createdAt || now - n.createdAt > DEVICE_FRESH_MS) continue;
     if (appVisible()) continue;
-    postDeviceNotification(n);
+    scheduleDevicePost(n);
   }
 
   // Catch-up pass: unread events after the watermark that already missed the
@@ -189,7 +217,7 @@ function deviceNotify(items: Notif[], uid: string) {
   // because the watermark advance below makes later ones empty by construction.
   const missed = items.filter((n) => {
     const t = n.createdAt ?? 0;
-    return !n.read && t > wm && now - t > DEVICE_FRESH_MS;
+    return !n.read && !n.pushed && t > wm && now - t > DEVICE_FRESH_MS;
   });
   if (missed.length > 0) postCatchup(missed);
 
@@ -346,9 +374,9 @@ export function notifPayload(n: NewNotif, fromUid: string): Record<string, unkno
 export function pushNotif(n: NewNotif) {
   const fromUid = auth.currentUser?.uid;
   if (!fromUid || !n.toUid || n.toUid === fromUid) return;
-  addDoc(collection(db, "notifications"), notifPayload(n, fromUid)).catch((err) =>
-    console.warn("notifications: push failed", err),
-  );
+  addDoc(collection(db, "notifications"), notifPayload(n, fromUid))
+    .then((ref) => triggerPush(ref.id))
+    .catch((err) => console.warn("notifications: push failed", err));
 }
 
 export function useNotifPrefs(): [NotifPrefs, (p: Partial<NotifPrefs>) => void] {

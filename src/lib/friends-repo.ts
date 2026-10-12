@@ -27,6 +27,7 @@ import { auth, db } from "./firebase";
 import { colorForHandle } from "./profile-store";
 import { getPublicProfiles, type PublicProfile } from "./profile-repo";
 import { notifPayload } from "./notifications-store";
+import { triggerPush } from "./push-repo";
 
 export type FriendRequestStatus = "pending" | "accepted" | "rejected" | "cancelled";
 
@@ -321,10 +322,11 @@ export async function unfriend(meUid: string, otherUid: string, actor: ActorInfo
 
   const countOps = await friendCountOps(meUid, otherUid, -1);
   const batch = writeBatch(db);
+  const notifRef = doc(collection(db, "notifications"));
   batch.delete(doc(db, FRIENDSHIPS, friendshipId(meUid, otherUid)));
   addFriendCountWrites(batch, countOps);
   batch.set(
-    doc(collection(db, "notifications")),
+    notifRef,
     notifPayload(
       {
         toUid: otherUid,
@@ -340,6 +342,7 @@ export async function unfriend(meUid: string, otherUid: string, actor: ActorInfo
     ),
   );
   await batch.commit();
+  triggerPush(notifRef.id);
 }
 
 /**
