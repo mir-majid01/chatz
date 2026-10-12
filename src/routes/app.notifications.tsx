@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Avatar } from "@/components/Avatar";
 import { useProfile } from "@/lib/profile-store";
@@ -82,6 +82,15 @@ function NotifPage() {
   const [prefs] = useNotifPrefs();
   const list = filterByPrefs(useNotifs(), prefs);
   const [prefsOpen, setPrefsOpen] = useState(false);
+  const [backendError, setBackendError] = useState(false);
+  useEffect(() => {
+    const onBackendStatus = (event: Event) => {
+      const state = (event as CustomEvent<{ state?: string }>).detail?.state;
+      setBackendError(state === "error");
+    };
+    window.addEventListener("chatz:backend-status", onBackendStatus);
+    return () => window.removeEventListener("chatz:backend-status", onBackendStatus);
+  }, []);
   // Notifications already acted on from this screen: id → outcome label.
   const [handled, setHandled] = useState<Map<string, string>>(new Map());
   const unread = unreadCount(list);
@@ -171,8 +180,24 @@ function NotifPage() {
           />
         )}
         {list.length === 0 && (
-          <div className="text-center text-muted-foreground py-16 text-sm">
-            You're all caught up ✨
+          <div className="text-center py-16 px-6">
+            <div className="text-sm font-medium text-foreground">
+              {backendError ? "Notifications are temporarily unavailable" : "You're all caught up ✨"}
+            </div>
+            <p className="text-xs text-muted-foreground mt-2">
+              {backendError
+                ? "Your notifications haven't been cleared. Check your connection and retry in a moment."
+                : "New activity will appear here."}
+            </p>
+            {backendError && (
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="mt-4 inline-flex items-center gap-2 rounded-full bg-secondary px-4 py-2 text-xs font-medium"
+              >
+                <RefreshCw size={13} /> Retry
+              </button>
+            )}
           </div>
         )}
       </div>
