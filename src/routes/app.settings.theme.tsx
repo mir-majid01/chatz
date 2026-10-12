@@ -11,10 +11,6 @@ export const Route = createFileRoute("/app/settings/theme")({
 function ThemePage() {
   const profile = useProfile();
   const navigate = useNavigate();
-  if (!profile) return null;
-
-  const setTheme = (t: Theme) => writeProfile({ ...profile, theme: t });
-  const setAccent = (a: Accent) => writeProfile({ ...profile, accent: a });
   const [reduceMotion, setReduceMotion] = useState(() => {
     try { return localStorage.getItem("chatz.appearance.reduceMotion") === "1"; } catch { return false; }
   });
@@ -30,6 +26,11 @@ function ThemePage() {
     document.documentElement.classList.toggle("compact-ui", compact);
     try { localStorage.setItem("chatz.appearance.compact", compact ? "1" : "0"); } catch {}
   }, [compact]);
+
+  if (!profile) return null;
+
+  const setTheme = (t: Theme) => writeProfile({ ...profile, theme: t });
+  const setAccent = (a: Accent) => writeProfile({ ...profile, accent: a });
 
   const themes: { v: Theme; label: string; icon: React.ReactNode }[] = [
     { v: "light", label: "Light", icon: <Sun size={18} /> },
