@@ -9,7 +9,6 @@ import { VibeStats } from "@/lib/vibe-stats";
 import { allPermsGranted, checkAllPerms, type PermState } from "@/lib/app-permissions";
 import { PermissionGate } from "@/components/PermissionGate";
 import { ChatZMark } from "@/components/Logo";
-import { ConnectionStatus } from "@/components/ConnectionStatus";
 import { Capacitor } from "@capacitor/core";
 import { App as NativeApp } from "@capacitor/app";
 import { Activity, RefreshCw, ShieldAlert, Users, User as UserIcon } from "lucide-react";
@@ -557,7 +556,6 @@ function AppShell() {
 
   return (
     <>
-      <ConnectionStatus />
       <div className="min-h-screen bg-background flex flex-col">
         {showLimitedBanner && (
           <Link
