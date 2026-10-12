@@ -15,6 +15,7 @@ import { Activity, RefreshCw, ShieldAlert, Users, User as UserIcon } from "lucid
 import { isChatUnread, useChatsOverview, useReadMarkers } from "@/lib/dm-repo";
 import { useNotifs } from "@/lib/notifications-store";
 import { UpdateScreen } from "@/components/UpdateScreen";
+import { ConnectionStatus } from "@/components/ConnectionStatus";
 import {
   checkForUpdates,
   getLastNotifiedVersion,
@@ -556,6 +557,7 @@ function AppShell() {
 
   return (
     <>
+      <ConnectionStatus />
       <div className="min-h-screen bg-background flex flex-col">
         {showLimitedBanner && (
           <Link
