@@ -82,7 +82,9 @@ function NotifPage() {
   const [prefs] = useNotifPrefs();
   const list = filterByPrefs(useNotifs(), prefs);
   const [prefsOpen, setPrefsOpen] = useState(false);
-  const [backendError, setBackendError] = useState(false);
+  const [backendError, setBackendError] = useState(() =>
+    typeof document !== "undefined" && document.documentElement.dataset.backendStatus === "error",
+  );
   useEffect(() => {
     const onBackendStatus = (event: Event) => {
       const state = (event as CustomEvent<{ state?: string }>).detail?.state;
