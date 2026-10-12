@@ -41,7 +41,7 @@ export function ConnectionStatus() {
       <div className="min-w-0 flex-1">
         <div className="text-xs font-semibold">{offline ? "You're offline" : "ChatZ is having trouble connecting"}</div>
         <div className="text-[11px] text-muted-foreground">
-          {offline ? "Cached information may still be available. Some actions will wait for a connection." : "Your last loaded content is preserved. Try again when the service recovers."}
+          {offline ? "Previously loaded screens may remain visible. New data and actions may fail until you reconnect." : "Your last loaded content is preserved. Try again when the service recovers."}
         </div>
       </div>
       <button
