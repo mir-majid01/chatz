@@ -293,9 +293,19 @@ export function useNotifs() {
           // Keep the last good snapshot: a temporary backend/network failure
           // must not masquerade as an empty inbox or "all caught up".
           console.warn("notifications: listen failed", (err as { code?: string })?.code);
-          window.dispatchEvent(new CustomEvent("chatz:backend-status", {
-            detail: { source: "notifications", state: "error" },
-          }));
+          const code = (err as { code?: string })?.code ?? "";
+          // Permission/rules errors are not proof of a backend outage. Only
+          // transport/service failures should trigger the global connection UI.
+          if (
+            code === "unavailable" ||
+            code === "deadline-exceeded" ||
+            code === "network-request-failed" ||
+            (typeof navigator !== "undefined" && !navigator.onLine)
+          ) {
+            window.dispatchEvent(new CustomEvent("chatz:backend-status", {
+              detail: { source: "notifications", state: "error" },
+            }));
+          }
           setList(latestUid === u.uid ? latest : []);
         },
       );
