@@ -108,11 +108,23 @@
   * {
     border-color: var(--color-border);
     -webkit-tap-highlight-color: transparent;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
   }
-  html, body {
+  html, body, #root {
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+  /* Keep selection available where it is functional: text inputs and explicit opt-ins. */
+  input, textarea, [contenteditable="true"], [data-text-selectable="true"] {
+    -webkit-user-select: text;
+    user-select: text;
+    -webkit-touch-callout: default;
   }
   body {
     background-color: var(--color-background);
@@ -205,6 +217,17 @@
 .frame-shine {
   animation: frame-shine 3.2s ease-in-out infinite;
 }
+
+.reduce-motion *, .reduce-motion *::before, .reduce-motion *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}
+.compact-ui .px-4.pt-5.pb-6.space-y-6 > :not([hidden]) ~ :not([hidden]) {
+  margin-top: 1rem;
+}
+.compact-ui .px-4.pt-5.pb-10 { padding-top: 1rem; padding-bottom: 1.5rem; }
 
 @media (prefers-reduced-motion: reduce) {
   .update-rise, .update-float, .update-glow, .update-shimmer, .update-pop, .frame-shine {

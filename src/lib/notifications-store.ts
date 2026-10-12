@@ -200,6 +200,23 @@ function postCatchup(missed: Notif[]) {
  */
 function deviceNotify(items: Notif[], uid: string) {
   const now = Date.now();
+
+  // A new install/profile has no history watermark. Treat the first snapshot as
+  // a baseline, not as dozens of new events; otherwise old unread rows become
+  // a misleading "ghost" catch-up notification on first launch.
+  let hasWatermark = false;
+  try {
+    hasWatermark = localStorage.getItem(`chatz.notifWm.${uid}`) !== null;
+  } catch {
+    // Storage may be unavailable in private/restricted WebView contexts.
+  }
+  if (!hasWatermark) {
+    for (const n of items) seenOnDevice.add(n.id);
+    const newest = items.reduce((m, n) => Math.max(m, n.createdAt || 0), 0);
+    writeWatermark(uid, newest);
+    return;
+  }
+
   const wm = readWatermark(uid);
 
   // Live pass: brand-new events while the app is hidden.
@@ -219,7 +236,7 @@ function deviceNotify(items: Notif[], uid: string) {
     const t = n.createdAt ?? 0;
     return !n.read && !n.pushed && t > wm && now - t > DEVICE_FRESH_MS;
   });
-  if (missed.length > 0) postCatchup(missed);
+  if (missed.length > 0 && !appVisible()) postCatchup(missed);
 
   const maxTs = items.reduce((m, n) => Math.max(m, n.createdAt || 0), wm);
   if (maxTs !== wm) writeWatermark(uid, maxTs);
@@ -263,6 +280,9 @@ export function useNotifs() {
           // oldest-first so the newest event is last.
           items.reverse();
 
+          window.dispatchEvent(new CustomEvent("chatz:backend-status", {
+            detail: { source: "notifications", state: "ok" },
+          }));
           // Device shade: live posts, frozen-gap catch-up, watermark advance.
           deviceNotify(items, u.uid);
 
@@ -270,10 +290,23 @@ export function useNotifs() {
           setList(items);
         },
         (err) => {
-          // Most common here: the notifications rules have not been published yet.
+          // Keep the last good snapshot: a temporary backend/network failure
+          // must not masquerade as an empty inbox or "all caught up".
           console.warn("notifications: listen failed", (err as { code?: string })?.code);
-          latest = [];
-          setList([]);
+          const code = (err as { code?: string })?.code ?? "";
+          // Permission/rules errors are not proof of a backend outage. Only
+          // transport/service failures should trigger the global connection UI.
+          if (
+            code === "unavailable" ||
+            code === "deadline-exceeded" ||
+            code === "network-request-failed" ||
+            (typeof navigator !== "undefined" && !navigator.onLine)
+          ) {
+            window.dispatchEvent(new CustomEvent("chatz:backend-status", {
+              detail: { source: "notifications", state: "error" },
+            }));
+          }
+          setList(latestUid === u.uid ? latest : []);
         },
       );
     });

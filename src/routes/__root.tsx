@@ -8,6 +8,7 @@ import {
 import { useEffect } from "react";
 
 import { reportLovableError } from "../lib/lovable-error-reporting";
+import { ConnectionStatus } from "@/components/ConnectionStatus";
 
 function NotFoundComponent() {
   return (
@@ -80,6 +81,7 @@ function RootComponent() {
 
   return (
     <QueryClientProvider client={queryClient}>
+      <ConnectionStatus />
       <Outlet />
     </QueryClientProvider>
   );
