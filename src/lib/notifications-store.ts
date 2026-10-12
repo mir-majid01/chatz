@@ -213,7 +213,7 @@ function deviceNotify(items: Notif[], uid: string) {
   if (!hasWatermark) {
     for (const n of items) seenOnDevice.add(n.id);
     const newest = items.reduce((m, n) => Math.max(m, n.createdAt || 0), 0);
-    if (newest > 0) writeWatermark(uid, newest);
+    writeWatermark(uid, newest);
     return;
   }
 
@@ -236,7 +236,7 @@ function deviceNotify(items: Notif[], uid: string) {
     const t = n.createdAt ?? 0;
     return !n.read && !n.pushed && t > wm && now - t > DEVICE_FRESH_MS;
   });
-  if (missed.length > 0) postCatchup(missed);
+  if (missed.length > 0 && !appVisible()) postCatchup(missed);
 
   const maxTs = items.reduce((m, n) => Math.max(m, n.createdAt || 0), wm);
   if (maxTs !== wm) writeWatermark(uid, maxTs);
