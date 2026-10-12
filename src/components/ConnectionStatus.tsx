@@ -17,7 +17,9 @@ export function ConnectionStatus() {
     const onlineAgain = () => setOnline(true);
     const backendStatus = (event: Event) => {
       const detail = (event as CustomEvent<{ state?: string }>).detail;
-      setBackendDown(detail?.state === "error");
+      const down = detail?.state === "error";
+      setBackendDown(down);
+      document.documentElement.dataset.backendStatus = down ? "error" : "ok";
     };
     window.addEventListener("offline", offline);
     window.addEventListener("online", onlineAgain);
