@@ -424,6 +424,10 @@ The push bridge's credential (`chatz-push` service-account JSON) lives **only** 
 ### Push Worker (`push-worker/`)
 Deployed to `https://chatz-push.chatz-app.workers.dev`. The app's `src/lib/push-repo.ts` holds the URL and both halves of the contract: `registerFcmToken(uid)` and `triggerPush(notifId)`. The Worker treats Firestore as the payload authority — a ping carries only a document id, so a caller can never forge notification text — and needs the Firebase Cloud Messaging Send API enabled on `dropscope-b588a`. Redeploy after editing: `cd push-worker && npx wrangler deploy`.
 
+**The FCM message must stay strictly data-only.** Adding anything under `android.notification` — even just `channel_id` — makes FCM classify it as a *notification* message, so a backgrounded app gets the OS's own tray entry (blank, since there is no title/body to render) and `onMessageReceived` never runs. Verified on device: with the block the shade showed `fcm_fallback_notification_channel` with `title=null`; without it, `ChatzPushService` created `chatz_messages` itself and posted the real text. The service is responsible for channel creation; the manifest is not.
+
+Delivery reaches a frozen, not-foregrounded ChatZ — XOS reported `transition from Frozen to Running, reason=broadcast` on `com.google.android.c2dm.intent.RECEIVE` and the notification posted within ~60 ms. It does **not** reach one stopped via Settings → Force stop: Android sets `FLAG_STOPPED` and suppresses FCM until the user next opens the app (confirmed — a force-stopped ChatZ never woke). Nothing in the app can or should work around that.
+
 ## Build Dependencies (Android)
 
 - Kotlin stdlib + coroutines 1.9.0

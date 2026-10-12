@@ -124,15 +124,19 @@ async function handlePush(request, env) {
   }
 
   const kind = str(notif, "kind");
-  const channel = kind === "message" ? "chatz_messages" : "chatz_social";
   const send = await fetch(FCM_SEND, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       message: {
         token: fcmToken,
-        // Data-only on purpose: the app decides how to present it, so a
-        // foregrounded ChatZ can stay silent and let the in-app badge speak.
+        // Data-only on purpose, and strictly data-only: putting anything under
+        // android.notification (even just channel_id) makes FCM classify this as
+        // a notification message, and then a backgrounded app gets the OS's own
+        // tray entry — blank, because there is no title/body to render — while
+        // onMessageReceived never runs. The service creates its channel and
+        // decides presentation, so a foregrounded ChatZ can stay silent and let
+        // the in-app badge speak.
         data: {
           notifId,
           kind,
@@ -140,10 +144,7 @@ async function handlePush(request, env) {
           body: str(notif, "text"),
           link: str(notif, "link"),
         },
-        android: {
-          priority: "high",
-          notification: { channel_id: channel, click_action: "LAUNCH" },
-        },
+        android: { priority: "high" },
       },
     }),
   });
