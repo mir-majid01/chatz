@@ -19,6 +19,8 @@ Search a person by `@handle` or name, send a friend request, accept it, and both
 
 There is exactly **one identity source** (Firebase Auth, Google Sign-In only) and **one data backend** (Cloud Firestore). Supabase, the news feed, the AI/Nuxo tab, ephemeral Instants, and chat attachments have all been removed.
 
+`docs/ARCHITECTURE.md` is the beginner-facing walkthrough of this whole system (two-brain layout, data model reasoning, notification paths, release chain, reading order). This file is the dense reference; that one is the explanation.
+
 ### Stack
 
 | Layer | Technology |
