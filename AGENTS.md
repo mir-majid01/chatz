@@ -188,7 +188,7 @@ Design notes:
 - **Search is prefix-only.** Firestore has no substring search, so `searchProfiles()` runs `>= q` / `<= q + '\uf8ff'` ranges over `handleLower` and `nameLower`, both filtered server-side by `discoverable == true`. `handles/{handleLower}` exists purely to keep handles unique; it is not the search index.
 - **Handles are case-insensitive.** `normalizeHandle()` lowercases before every read/write, so `@JohnDoe`, `@johndoe` and `@JOHNDoe` can never become three accounts.
 - **Private vs public split.** Firestore rules cannot hide individual fields on a readable document, so private fields (email, DOB, education, the `privacy` map and sharing `mode`) live in the `users/{uid}/private/data` subdocument (owner-only). The public profile carries only the derived `discoverable` boolean that search queries filter on.
-- **24h TTL for temporary activity.** Reactions, comments and notifications carry `expiresAt` (now + 24h, rules bound it to ±1h); readers also drop expired docs client-side (`isExpired`), and a Firestore TTL policy deletes server-side.
+- **24h TTL for temporary activity.** Reactions, comments and notifications carry `expiresAt` (now + 24h, minted from the **client** clock, rules bound to ±1h); readers drop expired docs client-side (`isExpired`). There is **no Firestore TTL policy and cannot be one on Spark** — TTL is a Blaze feature — so nothing physically deletes expired documents, and rules apply no read-time expiry filter. Do not describe expired docs as "cleaned up" anywhere. See `docs/CHATZ_PRODUCTION_AUDIT.md` §4.3.
 
 ## Security Rules (`firestore.rules`)
 

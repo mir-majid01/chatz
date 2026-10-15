@@ -228,7 +228,7 @@ Also worth knowing: `rules_version = '2'` means a `match` block applies **only t
 
 ### Two supporting conventions
 
-- **24h TTL on temporary activity.** Reactions, comments, and notifications carry `expiresAt` (rules bound it to ±1h). Readers also drop expired docs client-side (`ttl.ts`), and a Firestore TTL policy deletes them server-side. Three layers, because each one fails differently.
+- **24h expiry on temporary activity.** Reactions, comments, and notifications carry `expiresAt`, minted from the **client clock** (`ttl.ts:14`, rules tolerate ±1 h skew). Two things must be said plainly: expired documents are hidden **only client-side** — `firestore.rules` performs no read-time expiry check — and **there is no Firestore TTL policy**, and on the Spark plan there cannot be one (TTL is a Blaze feature; verified 2026-10-15). So an expired document stays in the database indefinitely; nothing physically deletes it. See `docs/CHATZ_PRODUCTION_AUDIT.md` §4.3 for the proposed two-mechanism fix.
 - **Avatars are drawn, not stored.** `avatars.ts` renders parametric SVG from an id + colours; only the id is saved. That is why the Storage bucket is declared and unused — there are no image uploads anywhere.
 
 ---
@@ -379,7 +379,9 @@ No Play Store, so the app has its own update channel:
    (Spark-plan Firebase Hosting refuses .apk files, hence GitHub raw)
 6. PATCH appConfig/updateMetadata in Firestore:
    latestVersionCode, latestVersionName, downloadUrl, sha256, changes[],
-   isMandatory, title, description, releaseDate
+   mandatory, title, description, releaseDate, minimumSupportedVersionCode
+   (the native reader names the flag `mandatory`; update-repo.ts surfaces it to
+   JS as `isMandatory`, which is a rename, not the stored field name)
    — authorised with an access token minted locally from the service-account key
 7. every running app is LISTENING on that one document → popup, no restart
 8. user taps Update → UpdateManager.kt downloads from raw.githubusercontent.com →
@@ -388,7 +390,7 @@ No Play Store, so the app has its own update channel:
 9. delete the superseded release (keep-only-latest)
 ```
 
-Why this behaves like a real product rather than a hack: the phone does not poll for updates, it holds a realtime subscription to one small document, so publishing propagates immediately and costs nothing per device. The SHA-256 check is what prevents a truncated or swapped APK from installing silently. `isMandatory: false` is the only knob for "everyone should move now, but they may defer".
+Why this behaves like a real product rather than a hack: the phone does not poll for updates, it holds a realtime subscription to one small document, so publishing propagates immediately and costs nothing per device. The SHA-256 check is what prevents a truncated or swapped APK from installing silently. `mandatory: false` (Firestore field name) is the only knob for "everyone should move now, but they may defer" — and it is only consulted together with `minimumSupportedVersionCode`, which defaults to 0 when absent (`UpdateManager.kt:92,:102`).
 
 Startup gating matters here too: the dashboard must not render before the update check completes, otherwise users see content they may be about to be blocked from.
 
@@ -482,7 +484,7 @@ Build the mental model in this sequence — each step answers one question.
 - **`FLAG_STOPPED`** — the OS state after Settings → Force stop, which suppresses background delivery until the app is reopened.
 - **Cloudflare Worker** — a small function running at Google-free edge locations, billed per request, free tier sufficient here.
 - **Service account** — a credential that acts as the project's admin, bypassing security rules.
-- **TTL** — time-to-live; documents stamped to expire, cleaned server-side.
+- **TTL** — time-to-live; documents stamped to expire. Firestore also sells a server-side "TTL policy" feature that physically deletes them, but it is **Blaze-plan only and is not in use here** — an expiry stamp in this app is metadata, not deletion.
 - **Idempotent** — running the same write twice produces the same state (the daily snapshot is; an increment would not be).
 
 ---

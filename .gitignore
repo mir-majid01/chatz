@@ -41,3 +41,7 @@ capacitor-cordova-android-plugins/
 *.njsproj
 *.sln
 *.sw?
+
+# Local-only security working documents (repo is public).
+# Never commit a risk register or credential inventory here.
+docs/CHATZ_PRODUCTION_AUDIT.md

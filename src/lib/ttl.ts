@@ -1,11 +1,14 @@
 // Temporary activity (reactions, comments, notifications) expires after 24 hours.
 //
-//   - The write carries `expiresAt` = now + 24h (rules bound it to ±1h of that).
-//   - A Firestore TTL policy on each collection deletes the document afterwards.
+//   - The write carries `expiresAt` = now + 24h from the CLIENT clock (rules bound
+//     it to ±1h of request.time), so a skewed device can mint a longer life.
 //
-// TTL deletion is best-effort and can lag, so every reader ALSO drops documents
-// whose stamp is already in the past (isExpired). A missing or malformed stamp
-// counts as non-expiring — a broken write can never hide a document forever.
+// There is no Firestore TTL policy — TTL is a Blaze-plan feature and this project
+// is on Spark — so nothing physically deletes an expired document, and the rules
+// apply no read-time expiry. Every reader MUST therefore drop documents whose
+// stamp is already in the past (isExpired); that is the only enforcement here.
+// A missing or malformed stamp counts as non-expiring, so a broken write leaves a
+// document visible indefinitely rather than hiding user data.
 import { Timestamp } from "firebase/firestore";
 
 export const TTL_MS = 24 * 60 * 60 * 1000;
