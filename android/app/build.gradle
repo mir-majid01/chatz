@@ -1,0 +1,96 @@
+apply plugin: 'com.android.application'
+apply plugin: 'kotlin-android'
+apply plugin: 'com.google.gms.google-services'
+
+android {
+    namespace "com.chatz.app"
+    compileSdk rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId "com.chatz.app"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 12
+        versionName "2.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    signingConfigs {
+        debug {
+            // Use debug keystore for testing
+        }
+        release {
+            def kf = file("keystore.properties")
+            def kp = new Properties()
+            if (kf.exists()) kf.withInputStream { kp.load(it) }
+            storeFile file(System.getenv("CHATZ_KEYSTORE_FILE") ?: kp.getProperty("storeFile", "chatz-release-key.keystore"))
+            storePassword System.getenv("CHATZ_KEYSTORE_PASSWORD") ?: kp.getProperty("storePassword", "")
+            keyAlias System.getenv("CHATZ_KEY_ALIAS") ?: kp.getProperty("keyAlias", "chatz")
+            keyPassword System.getenv("CHATZ_KEY_PASSWORD") ?: kp.getProperty("keyPassword", "")
+        }
+    }
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.release
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
+    }
+    kotlinOptions {
+        jvmTarget = '21'
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+
+    // Kotlin
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlinVersion"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0"
+
+    // WorkManager
+    implementation "androidx.work:work-runtime-ktx:$workManagerVersion"
+
+    // Lifecycle (for WorkManager coroutines)
+    implementation "androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7"
+
+    // Firebase — Auth for identity, Firestore for profiles, social graph and
+    // the usage snapshots the background worker uploads.
+    implementation platform('com.google.firebase:firebase-bom:33.12.0')
+    implementation 'com.google.firebase:firebase-auth'
+    implementation 'com.google.firebase:firebase-firestore'
+    // FCM: the chatz-push Worker targets this device token when the app's own
+    // listener has been frozen or killed.
+    implementation 'com.google.firebase:firebase-messaging'
+
+    // Google Sign-In (native support for Capacitor WebView)
+    implementation 'com.google.android.gms:play-services-auth:21.2.0'
+}
+
+apply from: 'capacitor.build.gradle'
+apply from: 'generate-keystore.gradle'
+

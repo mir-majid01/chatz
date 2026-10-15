@@ -23,9 +23,12 @@ dist-ssr
 !.env.example
 
 # Capacitor / Android
-android/
+# Native sources are tracked so releases are reviewable and reproducible.
+# android/.gitignore already excludes build output, IDE state, local.properties,
+# the release keystore, keystore.properties and google-services.json.
 capacitor-cordova-android-plugins/
-!android/.gitkeep
+# Web bundle copied in by `npx cap sync` — derived from dist/, never hand-edited.
+android/app/src/main/assets/public/
 
 # Wrangler / Cloudflare
 .wrangler/
