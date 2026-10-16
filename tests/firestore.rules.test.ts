@@ -397,6 +397,26 @@ describe("direct messages", () => {
         .update({ members: [A] }),
     );
   });
+
+  it("keeps a client clock out of the conversation preview's expiry", async () => {
+    // chats/{pairId} survives retention on purpose and lastMessage.text is a COPY
+    // of a message body, so the only thing that makes the list preview blank is
+    // lastMessage.at. If the client could set it, a device could keep message
+    // content readable in the chat list forever. The set(SV()) on the next line
+    // proves `at` is the only condition that failed.
+    const summary = (at: unknown) => ({
+      members: [A, B],
+      updatedAt: SV(),
+      lastMessage: { fromUid: A, text: "hi", at, clientAt: Date.now() },
+    });
+    await assertFails(
+      db(A)
+        .collection("chats")
+        .doc(PAIR)
+        .set(summary(ts(Date.now() + 365 * 24 * 60 * 60 * 1000))),
+    );
+    await assertSucceeds(db(A).collection("chats").doc(PAIR).set(summary(SV())));
+  });
 });
 
 describe("notifications", () => {
@@ -474,6 +494,25 @@ describe("reactions and comments on stat cards", () => {
     await assertFails(reactions(B).doc(B).set(reaction(B, "🔥")));
     await assertFails(reactions(B).doc(B).set(reaction(B, "skull")));
     await assertSucceeds(reactions(B).doc(B).set(reaction(B, "clap")));
+  });
+
+  it("takes the reaction timestamp from the server, not the client", async () => {
+    // createdAt decides BOTH the reader-side 24h filter and when the cleanup
+    // Worker deletes the document, so a client-chosen value would let one device
+    // make a reaction immortal. The very next line writes the same payload with
+    // serverTimestamp() and is accepted, which pins createdAt as the only
+    // condition that failed above.
+    const farFuture = ts(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    await assertFails(
+      reactions(A)
+        .doc(A)
+        .set({ ...reaction(A), createdAt: farFuture }),
+    );
+    await assertSucceeds(reactions(A).doc(A).set(reaction(A)));
+    // Re-reacting goes through setDoc(), so it is an UPDATE whose serverTimestamp
+    // differs from the stored one. A rule that demanded the stored value be
+    // repeated would deny every second reaction; this is the guard on that.
+    await assertSucceeds(reactions(A).doc(A).set(reaction(A, "wow")));
   });
 
   it("bounds comment length, requires friendship, and keeps comments immutable", async () => {

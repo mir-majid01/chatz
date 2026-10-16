@@ -23,6 +23,7 @@ import {
 import { db } from "./firebase";
 import { readProfile } from "./profile-store";
 import { pushNotif } from "./notifications-store";
+import { isExpiredDoc, TTL_MS } from "./ttl";
 
 export function dmConversationId(a: string, b: string): string {
   return a < b ? `${a}_${b}` : `${b}_${a}`;
@@ -62,21 +63,27 @@ function asMs(v: unknown): number {
 // ------------------------------------------------------------------ messages
 
 /**
- * Live messages for one conversation, oldest-first. Ordered by clientAt (desc)
- * and reversed: a pending serverTimestamp sorts as null locally and would land at
- * the wrong end of a createdAt ordering, while clientAt is already a real number.
+ * Live messages for one conversation, oldest-first, with the count of messages
+ * that have aged past the 24-hour window.
+ *
+ * Ordering uses `clientAt` (a pending serverTimestamp sorts as null locally and
+ * would land at the wrong end), but VISIBILITY is decided by the server-owned
+ * `createdAt` — a client clock cannot keep a message alive past the deadline,
+ * which is the same rule the security rules enforce on write.
  */
+export type DmThread = { messages: DmMessage[]; expiredCount: number };
+
 export function useDmMessages(
   peerUid: string | null,
   meUid: string | null,
   onError?: (err: Error) => void,
-): DmMessage[] {
-  const [messages, setMessages] = useState<DmMessage[]>([]);
+): DmThread {
+  const [thread, setThread] = useState<DmThread>({ messages: [], expiredCount: 0 });
   const errRef = useRef(onError);
   errRef.current = onError;
   useEffect(() => {
     if (!peerUid || !meUid || peerUid === meUid) {
-      setMessages([]);
+      setThread({ messages: [], expiredCount: 0 });
       return;
     }
     const q = query(
@@ -87,25 +94,31 @@ export function useDmMessages(
     return onSnapshot(
       q,
       (snap) => {
-        const rows = snap.docs.map((d) => {
+        let expiredCount = 0;
+        const rows: DmMessage[] = [];
+        for (const d of snap.docs) {
           const data = d.data();
-          return {
+          if (isExpiredDoc(data)) {
+            expiredCount++;
+            continue;
+          }
+          rows.push({
             id: d.id,
             fromUid: asString(data.fromUid),
             text: asString(data.text),
             createdAt: asMs(data.clientAt),
-          };
-        });
+          });
+        }
         rows.reverse();
-        setMessages(rows);
+        setThread({ messages: rows, expiredCount });
       },
       (err) => {
-        setMessages([]);
+        setThread({ messages: [], expiredCount: 0 });
         errRef.current?.(err);
       },
     );
   }, [peerUid, meUid]);
-  return messages;
+  return thread;
 }
 
 /**
@@ -181,13 +194,20 @@ export function useChatsOverview(
           const peerUid = members.find((m) => typeof m === "string" && m !== meUid);
           if (typeof peerUid !== "string") continue;
           const lm = (data.lastMessage ?? {}) as Record<string, unknown>;
+          // lastMessage.text is a COPY of a message, and the parent chat document
+          // survives retention on purpose. Without this the preview would keep the
+          // message content readable forever and the 24-hour rule would mean
+          // nothing. `lm.at` is server-owned (rules require at == request.time),
+          // so it — not clientAt — decides visibility.
+          const serverAt = asMs(lm.at);
+          const previewExpired = serverAt > 0 && Date.now() >= serverAt + TTL_MS;
           next.set(peerUid, {
             peerUid,
-            lastFromUid: asString(lm.fromUid),
-            lastText: asString(lm.text),
+            lastFromUid: previewExpired ? "" : asString(lm.fromUid),
+            lastText: previewExpired ? "" : asString(lm.text),
             // clientAt keeps unread comparisons in the same clock domain as the
             // local read markers; `at` stays the server-truth fallback.
-            at: asMs(lm.clientAt) || asMs(lm.at),
+            at: asMs(lm.clientAt) || serverAt,
           });
         }
         setChats(next);

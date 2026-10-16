@@ -55,7 +55,9 @@ service cloud.firestore {
     // read-time expiry check — a rule inspecting resource.data would make every
     // list query that could return an expired document fail as a whole
     // (Firestore does not filter silently). Clients filter expired items out of
-    // what they display, and a Firestore TTL policy deletes them server-side.
+    // what they display. Nothing deletes them server-side via a TTL policy: that
+    // feature requires the Blaze plan and this project is on Spark, so a scheduled
+    // Cloudflare Worker is the only physical delete (push-worker/src/retention.js).
     function freshExpiry() {
       return request.resource.data.expiresAt is timestamp
           && request.resource.data.expiresAt >= request.time + duration.value(23, 'h')
@@ -262,6 +264,10 @@ service cloud.firestore {
         && pairId == request.resource.data.members[0] + "_" + request.resource.data.members[1]
         && exists(/databases/$(database)/documents/friendships/$(pairId))
         && request.resource.data.lastMessage.fromUid == request.auth.uid
+        // lastMessage.text is a copy of a message body and this document is NOT
+        // deleted by retention, so the preview is only blankable on time if `at`
+        // belongs to the server. Client clocks are never allowed to decide it.
+        && request.resource.data.lastMessage.at == request.time
         && request.resource.data.keys().hasOnly(['members', 'updatedAt', 'lastMessage']);
 
       // Only the summary may ever change; the member list is frozen.
@@ -270,6 +276,7 @@ service cloud.firestore {
         && request.resource.data.members == resource.data.members
         && exists(/databases/$(database)/documents/friendships/$(pairId))
         && request.resource.data.lastMessage.fromUid == request.auth.uid
+        && request.resource.data.lastMessage.at == request.time
         && request.resource.data.keys().hasOnly(['members', 'updatedAt', 'lastMessage']);
 
       allow delete: if false;
@@ -356,6 +363,18 @@ service cloud.firestore {
       // The relationship check is REQUIRED here: without it any signed-in user
       // could write a reaction to any stat whose document id they guessed. The
       // authored fields must also stay compatible with the doc-id reactor.
+      //
+      // createdAt is always the server's now, for a create AND for an update: it
+      // really means "when this person last reacted", which is what the 24-hour
+      // reader-side expiry and the cleanup job measure from. A client cannot forge
+      // it, so a reaction cannot be made to live longer than 24 hours past the last
+      // reaction. The accepted consequence: re-reacting (a genuine user action, and
+      // one the app offers) restarts that person's window on that post.
+      //
+      // This could NOT be pinned to the original creation time: set() sends
+      // serverTimestamp() again, so on an update request.resource.data.createdAt is
+      // the NEW request time and would never equal the stored one — re-reacting
+      // would be denied (tests/firestore.rules.test.ts).
       allow create, update: if signedIn()
         && request.auth.uid == reactorUid
         && request.resource.data.uid == request.auth.uid
@@ -365,6 +384,7 @@ service cloud.firestore {
         // exact unicode form stored in this file.
         && request.resource.data.emoji in ['heart', 'fire', 'thumbs', 'wow', 'laugh', 'clap']
         && freshExpiry()
+        && request.resource.data.createdAt == request.time
         && request.resource.data.keys().hasOnly(['uid', 'emoji', 'createdAt', 'expiresAt']);
 
       allow delete: if signedIn() && request.auth.uid == reactorUid;
@@ -383,6 +403,7 @@ service cloud.firestore {
         && request.resource.data.text.size() > 0
         && request.resource.data.text.size() <= 1000
         && (request.resource.data.parentId == null || request.resource.data.parentId is string)
+        && request.resource.data.createdAt == request.time
         && freshExpiry()
         && request.resource.data.keys().hasOnly([
              'authorUid', 'authorName', 'authorHandle', 'authorColor',
@@ -481,6 +502,9 @@ service cloud.firestore {
         && request.resource.data.fromUid == request.auth.uid
         && request.resource.data.toUid != request.auth.uid
         && request.resource.data.read == false
+        // Server-owned creation time is what the 24h reader-side expiry and the
+        // cleanup job both measure from, so it must not be client-supplied.
+        && request.resource.data.createdAt == request.time
         && request.resource.data.text is string
         && request.resource.data.text.size() > 0
         && request.resource.data.text.size() <= 300

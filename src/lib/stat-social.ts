@@ -24,7 +24,7 @@ import {
   startAfter,
 } from "firebase/firestore";
 import { db } from "./firebase";
-import { expiresAt24h, isExpired } from "./ttl";
+import { expiresAt24h, isExpiredDoc } from "./ttl";
 
 export const REACTIONS = [
   { key: "heart", glyph: "❤️" },
@@ -89,11 +89,16 @@ function commentsCol(ownerUid: string, day: string) {
 /** Minimal shape shared by one-shot snapshots and live listens. */
 type DocLike = { id: string; get: (field: string) => unknown };
 
+const expiryFields = (d: DocLike) => ({
+  createdAt: d.get("createdAt"),
+  expiresAt: d.get("expiresAt"),
+});
+
 function summarizeReactions(docs: ReadonlyArray<DocLike>, myUid: string): ReactionSummary {
   const counts: Record<string, number> = {};
   let mine: string | null = null;
   for (const d of docs) {
-    if (isExpired(d.get("expiresAt"))) continue;
+    if (isExpiredDoc(expiryFields(d))) continue;
     const emoji = asString(d.get("emoji"));
     if (!REACTION_KEYS.includes(emoji)) continue;
     counts[emoji] = (counts[emoji] ?? 0) + 1;
@@ -134,7 +139,7 @@ export async function setReaction(
 
 function toComments(docs: ReadonlyArray<DocLike>): StatComment[] {
   return docs
-    .filter((d) => !isExpired(d.get("expiresAt")))
+    .filter((d) => !isExpiredDoc(expiryFields(d)))
     .map((d) => ({
       id: d.id,
       authorUid: asString(d.get("authorUid")),

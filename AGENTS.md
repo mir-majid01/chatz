@@ -188,7 +188,7 @@ Design notes:
 - **Search is prefix-only.** Firestore has no substring search, so `searchProfiles()` runs `>= q` / `<= q + '\uf8ff'` ranges over `handleLower` and `nameLower`, both filtered server-side by `discoverable == true`. `handles/{handleLower}` exists purely to keep handles unique; it is not the search index.
 - **Handles are case-insensitive.** `normalizeHandle()` lowercases before every read/write, so `@JohnDoe`, `@johndoe` and `@JOHNDoe` can never become three accounts.
 - **Private vs public split.** Firestore rules cannot hide individual fields on a readable document, so private fields (email, DOB, education, the `privacy` map and sharing `mode`) live in the `users/{uid}/private/data` subdocument (owner-only). The public profile carries only the derived `discoverable` boolean that search queries filter on.
-- **24h TTL for temporary activity.** Reactions, comments and notifications carry `expiresAt` (now + 24h, minted from the **client** clock, rules bound to ±1h); readers drop expired docs client-side (`isExpired`). There is **no Firestore TTL policy and cannot be one on Spark** — TTL is a Blaze feature — so nothing physically deletes expired documents, and rules apply no read-time expiry filter. Do not describe expired docs as "cleaned up" anywhere. See `docs/CHATZ_PRODUCTION_AUDIT.md` §4.3.
+- **24h retention for temporary activity.** Reactions, comments, notifications and DM messages all live 24 hours. The deadline is derived from the **server** stamp `createdAt` — the rules require `createdAt == request.time` on every create, so a client clock cannot stretch or hide a document. `expiresAt` (now + 24h from the client clock, rules bound to ±1h) is only a fallback for documents with no `createdAt`. Two enforcement points, and only two: readers filter with `isExpiredDoc()` (`src/lib/ttl.ts`), and the `chatz-push` Worker's cron deletes in bounded batches (`push-worker/src/retention.js`). There is **no Firestore TTL policy and cannot be one on Spark** — TTL is a Blaze feature — so nothing else ever removes a document. Do not write "cleaned up by TTL" anywhere. Consequences to respect: `chats/{pairId}` outlives its messages on purpose, which is why `useChatsOverview` blanks `lastMessage.text` once `lastMessage.at` is older than 24h; re-reacting is an update that writes a fresh `createdAt`, so it restarts that person's window. Survey before ever enabling deletes: `node scripts/retention-dry-run.mjs`. See `docs/CHATZ_PRODUCTION_AUDIT.md` §4.3.
 
 ## Security Rules (`firestore.rules`)
 
@@ -324,10 +324,15 @@ npm run format           # Prettier
 ./node_modules/.bin/tsc --noEmit   # Type check (bare `npx tsc` can resolve the wrong package)
 npx cap sync android     # Sync web build to Android
 
-# Security-rule tests (the repo's only automated test suite)
-export JAVA_HOME="C:\\Program Files\\Android\\Android Studio\\jbr"   # the emulator needs a JDK
-npm run test:rules       # boots the Firestore emulator and runs tests/firestore.rules.test.ts
-npm run test             # vitest alone, ONLY with an emulator already listening on 8099
+# Automated tests
+export JAVA_HOME="C:\\Program Files\\Android\\Android Studio\\jbr"
+export PATH="$JAVA_HOME/bin:$PATH"   # required: firebase-tools spawns `java` from PATH,
+                                     # and Java is not on PATH on this machine
+npm run test:rules       # boots the Firestore emulator and runs every test file
+npm test                 # vitest alone; tests/ttl.test.ts passes, tests/firestore.rules.test.ts
+                         # needs an emulator already listening on 8099
+node scripts/retention-dry-run.mjs   # READ-ONLY survey of production data against the 24h
+                                     # rule: counts, age buckets, missing timestamps, delete budget
 ```
 
 `npm run lint` measures **over 10 minutes** on this machine and was previously mistaken for a clean run because a short `timeout` kills it silently and prints nothing. Prefer scoping it (`eslint tests vitest.config.ts`) during iteration, and do not report an empty `eslint .` output as "0 problems" without checking the exit code.
@@ -372,6 +377,8 @@ Two full review passes have been made over this codebase after the Firestore re-
 9. **`chats/{pairId}/messages` create checks pair membership**, not just `fromUid == request.auth.uid`. The read rule always checked membership; create did not, which let any signed-in user append a message into a friends' thread (found by `tests/firestore.rules.test.ts`, fixed in M1). Keep both rules symmetrical — a create rule that is looser than its read rule is a hole, not a convenience.
 10. **Every activity window is `FLAG_SECURE`, set in `MainActivity.onCreate` before `super.onCreate()` and never cleared.** ChatZ has one window, so there is no per-screen policy to narrow it; do not "optimize" it by toggling the flag from JS, which would make the client the arbiter of its own protection. Known gaps by design: the Google account picker, Android Settings screens and the system installer are separate windows and cannot be covered, and the flag does not stop an external camera.
 11. **Notification text is `VISIBILITY_PRIVATE` with a sanitized `publicVersion` on both posting paths** (`VibeStatsPlugin.notify` and `ChatzPushService`). Set it on the *builder*, not the channel: an existing channel's lock-screen setting can never be edited in place, so a channel-only change silently does nothing on every installed device.
+12. **Expiry reads the server stamp, never the client's.** `isExpiredDoc()` derives the 24h deadline from `createdAt` (rules: `createdAt == request.time`) and falls back to `expiresAt` only when `createdAt` is absent; a document with neither stamp stays visible. Ordering DMs by `clientAt` while filtering by `createdAt` is deliberate — do not "simplify" one into the other. The same split applies to `chats/{pairId}.lastMessage.at`, which is what blanks the preview text after 24h.
+13. **Retention deletes are opt-in.** The Worker cron runs with `CLEANUP_DRY_RUN` unset or non-`"false"`, which counts and logs but deletes nothing. Flipping it to `false` on the current dataset removes every existing DM (46 of 46 at the time of the M2 survey) — never flip it to make a test pass, and never add an unbounded query to `push-worker/src/retention.js`; the batch limits are what keep it inside the Spark write quota.
 
 ### CL-1 · CRITICAL (deploy): `firebase.json` did not publish the security rules
 `firebase.json` referenced only `firestore.indexes.json`. A `firebase deploy --only firestore` would publish indexes but never `firestore.rules`, leaving the live rules untouched — if the project was created in locked mode, **every** Firestore read/write fails. Fixed by adding `"rules": "firestore.rules"`. Verified sane defaults elsewhere: `firestore.indexes.json` contains exactly the two search composites; both search queries in `profile-repo.searchProfiles` match them.

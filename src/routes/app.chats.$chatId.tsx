@@ -89,7 +89,7 @@ function ChatDetail() {
   }, [chatId, liveGroup, profile?.uid]);
 
   const groupMessages = useChatMessages(chatId);
-  const dmMessages = useDmMessages(liveGroup ? null : chatId, profile?.uid ?? null);
+  const dmThread = useDmMessages(liveGroup ? null : chatId, profile?.uid ?? null);
 
   // Bubbles render one shape; DMs come from Firestore and are mapped into the
   // same chat-store Message shape so the transcript stays single-path.
@@ -97,7 +97,7 @@ function ChatDetail() {
     if (liveGroup) return groupMessages;
     const myUid = profile?.uid;
     if (!myUid) return [];
-    return dmMessages.map((m) => {
+    return dmThread.messages.map((m) => {
       const mine = m.fromUid === myUid;
       const d = new Date(m.createdAt);
       return {
@@ -112,7 +112,7 @@ function ChatDetail() {
   }, [
     liveGroup,
     groupMessages,
-    dmMessages,
+    dmThread,
     profile?.uid,
     profile?.name,
     profile?.color,
@@ -138,10 +138,10 @@ function ChatDetail() {
   useEffect(() => {
     const myUid = profile?.uid;
     if (liveGroup || !myUid) return;
-    const last = dmMessages[dmMessages.length - 1];
+    const last = dmThread.messages[dmThread.messages.length - 1];
     if (!last) return;
     markChatRead(myUid, chatId, Math.max(Date.now(), last.createdAt));
-  }, [liveGroup, profile?.uid, chatId, dmMessages]);
+  }, [liveGroup, profile?.uid, chatId, dmThread]);
 
   const chat: ChatMeta | null = liveGroup
     ? {
@@ -284,6 +284,13 @@ function ChatDetail() {
     </div>
   );
 
+  const expiredNotice =
+    dmThread.expiredCount === 0
+      ? ""
+      : `${dmThread.expiredCount} older ${
+          dmThread.expiredCount === 1 ? "message has" : "messages have"
+        } expired. Chats are kept for 24 hours.`;
+
   return (
     <div className="flex-1 flex flex-col min-h-0">
       <header className="sticky top-0 z-20 glass-blur safe-top px-3 pt-2 pb-2 flex items-center gap-2 border-b border-border">
@@ -312,13 +319,28 @@ function ChatDetail() {
       </header>
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-4 space-y-1.5">
+        {!chat.isGroup && expiredNotice && messages.length > 0 ? (
+          <div className="text-center text-[11px] text-muted-foreground pb-1">{expiredNotice}</div>
+        ) : null}
         {messages.length === 0 ? (
           <div className="h-full grid place-items-center text-center text-muted-foreground">
             <div>
-              <div className="text-[14px] font-medium">No messages yet</div>
-              <div className="text-[12px] mt-1">
-                Say hi to {chat.isGroup ? "the group" : chat.name.split(" ")[0]}.
-              </div>
+              {chat.isGroup || dmThread.expiredCount === 0 ? (
+                <>
+                  <div className="text-[14px] font-medium">No messages yet</div>
+                  <div className="text-[12px] mt-1">
+                    Say hi to {chat.isGroup ? "the group" : chat.name.split(" ")[0]}.
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="text-[14px] font-medium">Earlier messages have expired</div>
+                  <div className="text-[12px] mt-1">
+                    Chats are kept for 24 hours, then the messages are deleted — this conversation
+                    stays here.
+                  </div>
+                </>
+              )}
             </div>
           </div>
         ) : (

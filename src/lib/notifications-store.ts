@@ -22,7 +22,7 @@ import {
   writeBatch,
 } from "firebase/firestore";
 import { auth, db } from "./firebase";
-import { expiresAt24h, isExpired } from "./ttl";
+import { expiresAt24h, isExpiredDoc } from "./ttl";
 import { triggerPush } from "./push-repo";
 import { VibeStats } from "./vibe-stats";
 
@@ -257,7 +257,7 @@ export function useNotifs() {
         q,
         (snap) => {
           const items = snap.docs
-            .filter((d) => !isExpired(d.data().expiresAt))
+            .filter((d) => !isExpiredDoc(d.data()))
             .map((d) => toNotif(d.id, d.data()));
           // Already sorted by createdAt desc from the query — reversed to
           // oldest-first so the newest event is last.
@@ -298,7 +298,7 @@ export async function loadOlderNotifs(cursorCreatedAt: number, cursorId: string,
   );
   const snap = await getDocs(q);
   const items = snap.docs
-    .filter((d) => !isExpired(d.data().expiresAt))
+    .filter((d) => !isExpiredDoc(d.data()))
     .map((d) => toNotif(d.id, d.data()));
   return items.reverse(); // Return oldest-first for appending
 }

@@ -3,6 +3,17 @@
   "name": "chatz-push",
   "main": "src/index.js",
   "compatibility_date": "2026-10-01",
+  "vars": {
+    // Deleting user data is destructive: real cleanup is opt-in. Flip this to
+    // "false" only after the dry-run report has been reviewed and approved.
+    "CLEANUP_DRY_RUN": "true",
+    "RETENTION_BATCH": "40"
+  },
+  "triggers": {
+    // 48 runs/day × up to 160 deletes is far more headroom than the backlog
+    // needs, and each run stays inside the free plan's 10 ms CPU budget.
+    "crons": ["*/30 * * * *"]
+  },
   "observability": {
     "enabled": true
   }

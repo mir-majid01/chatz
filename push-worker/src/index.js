@@ -12,7 +12,12 @@
  *
  * Secrets (wrangler secret put):
  *   SA_JSON  — the chatz-push service-account key JSON, verbatim.
+ *
+ * Vars (wrangler.jsonc): CLEANUP_DRY_RUN ("false" to actually delete),
+ * RETENTION_BATCH. The `scheduled` handler runs the 24-hour retention sweep.
  */
+
+import { runRetention, RETENTION_DEFAULT_BATCH } from "./retention.js";
 
 const PROJECT_ID = "dropscope-b588a";
 const FS_BASE = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents`;
@@ -189,5 +194,31 @@ export default {
       }
     }
     return Response.json({ ok: true, service: "chatz-push" });
+  },
+
+  /**
+   * 24-hour retention sweep. Counts only, never contents: message text and
+   * notification bodies are user data and must not reach the logs.
+   */
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(
+      (async () => {
+        try {
+          const token = await getAccessToken(env);
+          const report = await runRetention({
+            base: FS_BASE,
+            token,
+            dryRun: env.CLEANUP_DRY_RUN !== "false",
+            limit: Number(env.RETENTION_BATCH) || RETENTION_DEFAULT_BATCH,
+          });
+          console.log(
+            `retention dryRun=${report.dryRun} found=${report.totalFound} deleted=${report.totalDeleted} ` +
+              report.targets.map((t) => `${t.label}:${t.found}/${t.deleted}${t.error ? "!err" : ""}`).join(" "),
+          );
+        } catch (err) {
+          console.error("retention failed", String(err?.message ?? err).slice(0, 200));
+        }
+      })(),
+    );
   },
 };
