@@ -1,5 +1,6 @@
 package com.chatz.app.data.push
 
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -98,6 +99,19 @@ class ChatzPushService : FirebaseMessagingService() {
             )
             .setCategory(if (isMessage) NotificationCompat.CATEGORY_MESSAGE else NotificationCompat.CATEGORY_SOCIAL)
             .setAutoCancel(true)
+            // Push payloads carry the DM text straight from Firestore, so the
+            // locked-device copy must be sanitized too — otherwise the two
+            // notification paths would disagree about what leaks on a lock screen.
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(
+                NotificationCompat.Builder(this, channelId)
+                    .setSmallIcon(applicationInfo.icon)
+                    .setContentTitle("ChatZ")
+                    .setContentText("You have a new notification")
+                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                    .apply { pending?.let { setContentIntent(it) } }
+                    .build()
+            )
             .apply { pending?.let { setContentIntent(it) } }
             .build()
 
@@ -117,7 +131,9 @@ class ChatzPushService : FirebaseMessagingService() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val system = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         system.createNotificationChannel(
-            NotificationChannel(id, name, importance)
+            NotificationChannel(id, name, importance).apply {
+                setLockscreenVisibility(Notification.VISIBILITY_PRIVATE)
+            }
         ) // idempotent
     }
 

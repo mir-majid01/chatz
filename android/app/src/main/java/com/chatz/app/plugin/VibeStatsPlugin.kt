@@ -2,6 +2,7 @@ package com.chatz.app.plugin
 
 import android.Manifest
 import android.app.Activity
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -322,6 +323,10 @@ class VibeStatsPlugin : Plugin() {
             }
             val notificationChannel = NotificationChannel(channelId, channelName, importance).apply {
                 description = channelDesc
+                // DM text, who reacted and what a comment said must not sit on a
+                // lock screen. Private: the sanitized publicVersion below is what
+                // shows when the device is locked.
+                setLockscreenVisibility(Notification.VISIBILITY_PRIVATE)
             }
             manager.createNotificationChannel(notificationChannel)
         }
@@ -345,6 +350,18 @@ class VibeStatsPlugin : Plugin() {
             .setCategory(if (isMessage) NotificationCompat.CATEGORY_MESSAGE else NotificationCompat.CATEGORY_SOCIAL)
             .setAutoCancel(true)
             .setContentIntent(pending)
+            // Per-notification, so it also applies to channels created before this
+            // change — a channel's lock-screen setting cannot be edited in place.
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(
+                NotificationCompat.Builder(context, channelId)
+                    .setSmallIcon(context.applicationInfo.icon)
+                    .setContentTitle("ChatZ")
+                    .setContentText("You have a new notification")
+                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                    .setContentIntent(pending)
+                    .build()
+            )
             .build()
 
         try {

@@ -282,6 +282,13 @@ service cloud.firestore {
           && exists(/databases/$(database)/documents/friendships/$(pairId));
 
         allow create: if signedIn()
+          // Pair membership is required here too. The read rule above has always
+          // checked it, but create did not — which let ANY signed-in user append a
+          // message to chats/{pairId}/messages for a pair that was friends, and
+          // both of them would then read it. Caught by
+          // tests/firestore.rules.test.ts > "keeps a third user out of the
+          // conversation entirely".
+          && (request.auth.uid == pairId.split("_")[0] || request.auth.uid == pairId.split("_")[1])
           && request.resource.data.fromUid == request.auth.uid
           && request.resource.data.text is string
           && request.resource.data.text.size() > 0
