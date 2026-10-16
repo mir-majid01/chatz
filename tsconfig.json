@@ -3,6 +3,7 @@
     "src/**/*.ts",
     "src/**/*.tsx",
     "tests/**/*.ts",
+    "push-worker/src/**/*.js",
     "vite.config.ts",
     "vitest.config.ts",
     "eslint.config.js"
@@ -17,6 +18,9 @@
     /* Bundler mode */
     "moduleResolution": "Bundler",
     "allowImportingTsExtensions": true,
+    /* The Worker is plain JS. Typecheck OFF (checkJs is not set) but resolvable,
+       so tests/*.ts can import push-worker/src/*.js without an implicit-any error. */
+    "allowJs": true,
     "verbatimModuleSyntax": false,
     "noEmit": true,
 
