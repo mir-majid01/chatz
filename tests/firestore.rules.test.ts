@@ -419,6 +419,181 @@ describe("direct messages", () => {
   });
 });
 
+describe("shared files", () => {
+  // Doc ids here carry no underscores: the R2 key is derived from `files/{uid}/{fileId}`
+  // and the rule compares it literally, so an ambiguous id would hide a real bug.
+  const meta = (
+    sender: string,
+    recipient: string,
+    id: string,
+    over: Record<string, unknown> = {},
+  ) => ({
+    senderUid: sender,
+    recipientUid: recipient,
+    fileName: "report.pdf",
+    mimeType: "application/pdf",
+    declaredSize: 1024,
+    key: `files/${sender}/${id}`,
+    state: "pending",
+    createdAt: SV(),
+    ...over,
+  });
+  const files = (uid: string) => db(uid).collection("files");
+
+  /**
+   * Any refusal counts: a clean PERMISSION_DENIED *or* a rules evaluation error.
+   * Firestore's `&&` does not reliably short-circuit, so `declaredSize <= N` on a
+   * string aborts the expression instead of returning false. Either way the write
+   * is refused — see the create rule, where `is int` is checked first anyway.
+   */
+  const assertDenied = async (p: Promise<unknown>) => {
+    await expect(p).rejects.toThrow();
+  };
+
+  it("is created only by the sender, for a friend, within the cap", async () => {
+    await assertSucceeds(
+      files(A)
+        .doc("fA0001")
+        .set(meta(A, B, "fA0001")),
+    );
+    // Writing another user's document id, or claiming to be them, is refused even
+    // though the metadata otherwise looks perfect.
+    await assertFails(
+      files(A)
+        .doc("fA0002")
+        .set({ ...meta(A, B, "fA0002"), senderUid: B }),
+    );
+    await assertSucceeds(
+      files(B)
+        .doc("fB0003")
+        .set(meta(B, A, "fB0003")),
+    ); // reverse direction is equally legal
+    // Not friends: nothing to share yet, and no way to fake it here.
+    await assertFails(
+      files(OUTSIDER)
+        .doc("fO0001")
+        .set(meta(OUTSIDER, A, "fO0001")),
+    );
+  });
+
+  it("refuses an oversize, malformed or extra-field upload declaration", async () => {
+    const at = (over: Record<string, unknown>) =>
+      files(A)
+        .doc("fA1001")
+        .set({ ...meta(A, B, "fA1001"), ...over });
+    await assertFails(at({ declaredSize: 262_144_001 })); // one byte over 250 MiB
+    await assertFails(at({ declaredSize: 0 }));
+    await assertFails(at({ declaredSize: -5 }));
+    await assertFails(at({ declaredSize: 1024.5 })); // not an int
+    await assertDenied(at({ declaredSize: "1024" })); // a string is not an int
+    await assertFails(at({ fileName: "two/paths" }));
+    await assertFails(at({ fileName: "line\nbreak" }));
+    await assertFails(at({ fileName: "x".repeat(201) }));
+    await assertFails(at({ state: "ready" })); // 'ready' is the Worker's answer, not a claim
+    await assertFails(at({ actualSize: 1 })); // unknown field
+    await assertFails(at({ mimeType: "x" }));
+    await assertFails(at({ key: "files/someone-else/fA1001" }));
+    await assertFails(at({ createdAt: ts(Date.now() + 60_000) })); // must be server time
+    await assertSucceeds(
+      files(A)
+        .doc("fA1002")
+        .set({ ...meta(A, B, "fA1002"), fileName: "réport (final).pdf" }),
+    );
+    // The boundary itself: exactly 250 MiB is accepted, so the refusals above are
+    // the cap doing its job and not a side effect of another check. Each accepted
+    // case needs its OWN document id — once fA1001 exists, writing it again is an
+    // update, and updates are denied for every client by design.
+    await assertSucceeds(
+      files(A)
+        .doc("fA1003")
+        .set({ ...meta(A, B, "fA1003"), declaredSize: 262_144_000 }),
+    );
+  });
+
+  it("allows no client update at all, and only the sender may delete", async () => {
+    await assertSucceeds(
+      files(A)
+        .doc("fA2001")
+        .set(meta(A, B, "fA2001")),
+    );
+    await assertFails(files(A).doc("fA2001").update({ state: "ready" }));
+    await assertFails(files(A).doc("fA2001").update({ actualSize: 999_999_999 }));
+    await assertFails(files(B).doc("fA2001").update({ state: "ready" }));
+    // The recipient must not be able to make a file disappear on the sender.
+    await assertFails(files(B).doc("fA2001").delete());
+    await assertSucceeds(files(A).doc("fA2001").delete());
+  });
+
+  it("shows a file to its recipient only once the Worker marks it ready", async () => {
+    await seed((d) =>
+      d
+        .collection("files")
+        .doc("fA3001")
+        .set({ ...meta(A, B, "fA3001"), actualSize: 1024, etag: "abc", readyAt: ts(Date.now()) }),
+    );
+    await assertSucceeds(files(A).doc("fA3001").get()); // sender sees their own, pending or not
+    await assertFails(files(B).doc("fA3001").get()); // still 'pending'
+    await assertFails(db(OUTSIDER).collection("files").doc("fA3001").get());
+    await seed((d) => d.collection("files").doc("fA3001").update({ state: "ready" }));
+    await assertSucceeds(files(B).doc("fA3001").get());
+  });
+
+  it("lists only for the uploader, so a recipient reads a shared file by id", async () => {
+    await seed((d) =>
+      Promise.all([
+        d
+          .collection("files")
+          .doc("fA4001")
+          .set({ ...meta(A, B, "fA4001"), state: "ready" }),
+        d
+          .collection("files")
+          .doc("fA4002")
+          .set(meta(A, B, "fA4002")),
+      ]),
+    );
+    // The uploader's scoped list is provable from the query alone.
+    await assertSucceeds(db(A).collection("files").where("senderUid", "==", A).get());
+    // A recipient gets no list at all, scoped or otherwise. Firestore must be able
+    // to prove a list from the query's filters, and this rule's recipient branch
+    // (state == ready AND a live friendship) is not provable, so the whole query is
+    // refused — an evaluation error in the emulator, PERMISSION_DENIED in
+    // production. Either way a refusal, hence assertDenied rather than assertFails.
+    await assertDenied(db(B).collection("files").where("recipientUid", "==", B).get());
+    await assertDenied(db(B).collection("files").where("senderUid", "==", A).get());
+    await assertDenied(db(OUTSIDER).collection("files").where("senderUid", "==", A).get());
+    // What the client does instead: the chat message carries the id, and `get`
+    // still enforces both state and friendship.
+    await assertSucceeds(db(B).collection("files").doc("fA4001").get());
+    await assertFails(db(B).collection("files").doc("fA4002").get());
+    await assertFails(db(OUTSIDER).collection("files").doc("fA4001").get());
+  });
+
+  it("revokes a recipient the moment the friendship ends", async () => {
+    // Fresh uids with their own friendship: no other suite may inherit A–C as a
+    // side effect, because the reaction and comment tests below rely on "C is not
+    // my friend" meaning what it says.
+    const D = "dddTestUid0000000000";
+    const E = "eeeTestUid0000000000";
+    const pair = `${D}_${E}`;
+    await seed(async (d) => {
+      await d
+        .collection("friendships")
+        .doc(pair)
+        .set({ members: [D, E], createdAt: SV() });
+      await d
+        .collection("files")
+        .doc("fD5001")
+        .set({ ...meta(D, E, "fD5001"), state: "ready" });
+    });
+    await assertSucceeds(db(E).collection("files").doc("fD5001").get());
+    await seed((d) => d.collection("friendships").doc(pair).delete());
+    await assertFails(db(E).collection("files").doc("fD5001").get());
+    // Unfriending revokes the recipient, never the owner.
+    await assertSucceeds(db(D).collection("files").doc("fD5001").get());
+    await seed((d) => d.collection("files").doc("fD5001").delete());
+  });
+});
+
 describe("notifications", () => {
   const payload = (over: Record<string, unknown> = {}) => ({
     toUid: B,

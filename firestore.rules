@@ -311,6 +311,70 @@ service cloud.firestore {
       }
     }
 
+    // -------------------------------------------------------------- shared files
+    //
+    // files/{fileId} — METADATA ONLY. The bytes live in R2. A document is created by
+    // the sender with state 'pending', and only the chatz-push Worker (admin, so
+    // outside these rules) ever moves it: it opens the multipart upload, streams each
+    // part, and at completion records the size and content type R2 actually reports.
+    // That is why `allow update` is false for every client — a declared size is a
+    // request for permission, never the truth, and 'ready' is a server decision.
+    //
+    // The R2 key is derived from the owner and the document id, so an uploader can
+    // never address a path inside another user's prefix. Uids contain no '_', so the
+    // sender is recoverable from fileId the same way statPosts recovers the owner.
+    match /files/{fileId} {
+      // `resource == null` keeps a read of a deleted/never-created document a clean
+      // not-found instead of an evaluation error (same convention as friendRequests).
+      // A recipient sees a file only once the bytes are verified, and only while the
+      // friendship is still live — unfriending or blocking revokes it, exactly as it
+      // does for chats.
+      allow get: if signedIn() && (resource == null
+        || resource.data.senderUid == request.auth.uid
+        || (resource.data.recipientUid == request.auth.uid
+            && resource.data.state == 'ready'
+            && areFriends(resource.data.senderUid, resource.data.recipientUid)));
+
+      // Sender-only, deliberately. Firestore must be able to prove a list query is
+      // in scope from its own filters, and an OR of two different subjects is not
+      // provable: `where("recipientUid","==",me)` against a rule that also demands
+      // state=='ready' and a live friendship aborts with "Property senderUid is
+      // undefined" instead of filtering (verified in the emulator). So a recipient
+      // reaches a file with `get` by id — the chat message or notification carries
+      // it — and only the uploader can list a collection of file documents.
+      allow list: if signedIn() && resource.data.senderUid == request.auth.uid;
+
+      allow create: if signedIn()
+        && request.resource.data.senderUid == request.auth.uid
+        && request.resource.data.recipientUid != request.auth.uid
+        && areFriends(request.auth.uid, request.resource.data.recipientUid)
+        && request.resource.data.state == 'pending'
+        // No path separators, backslashes or control characters: the name comes back
+        // as a download filename, and the Worker still has to quote it there.
+        && request.resource.data.fileName is string
+        && request.resource.data.fileName.matches('^[^\\x00-\\x1f/\\\\]{1,200}$')
+        && request.resource.data.mimeType is string
+        && request.resource.data.mimeType.size() >= 3
+        && request.resource.data.mimeType.size() <= 100
+        // 250 MiB, declared in bytes. A cap the client enforces is not a cap.
+        && request.resource.data.declaredSize is int
+        && request.resource.data.declaredSize > 0
+        && request.resource.data.declaredSize <= 262144000
+        && request.resource.data.key == 'files/' + request.auth.uid + '/' + fileId
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.keys().hasOnly([
+             'senderUid', 'recipientUid', 'fileName', 'mimeType',
+             'declaredSize', 'key', 'state', 'createdAt'
+           ]);
+
+      // state, actualSize and the R2 etag are the Worker's. Nothing else may change.
+      allow update: if false;
+
+      // The sender may retract their own upload at any time; the object itself is
+      // removed by the retention job and, failing that, by the bucket lifecycle rule.
+      allow delete: if signedIn() && resource.data.senderUid == request.auth.uid;
+    }
+
     // -------------------------------------------------------------- usage data
 
     // The 15-minute WorkManager snapshot. Owner writes, friends may read. Silent
