@@ -48,7 +48,7 @@ There is exactly **one identity source** (Firebase Auth, Google Sign-In only) an
 │       ├── build.gradle            # Firebase Auth + Firestore, WorkManager, Play Services Auth
 │       ├── google-services.json    # Firebase Android config
 │       └── src/main/
-│           ├── AndroidManifest.xml # 7 permissions, single MainActivity (singleTask)
+│           ├── AndroidManifest.xml # 9 permissions, single MainActivity (singleTask)
 │           └── java/com/chatz/app/
 │               ├── MainActivity.java           # Registers VibeStatsPlugin
 │               ├── plugin/VibeStatsPlugin.kt   # Capacitor plugin: Google Sign-In, permissions, stats, native session
@@ -279,6 +279,8 @@ Constraints worth remembering:
 | `PACKAGE_USAGE_STATS` | Real screen time. **Without this declaration Android never lists ChatZ under Settings → Special app access → Usage access**, and the toggle appears greyed out and un-tappable. It is declared with `tools:ignore="ProtectedPermissions"` (AppOps permission, granted by the user, not at install time) | Core feature |
 | `RECEIVE_BOOT_COMPLETED` | Let WorkManager re-arm after reboot | For background sync |
 | `READ_PHONE_STATE` (`maxSdkVersion="25"`) | Mobile-data stats only on Android 6–7 | Legacy |
+| `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` | lets `checkBatteryOptimization()` / the exemption flow work | For background sync |
+| `REQUEST_INSTALL_PACKAGES` | the in-app update flow hands the verified APK to the system installer | Core feature (update system) |
 
 Camera, microphone, location, contacts, media and foreground-service permissions were deliberately removed — no feature needs them.
 
@@ -317,11 +319,18 @@ npm run dev              # Start Vite dev server
 npm run build            # Production build
 npm run build:dev        # Dev build
 npm run preview          # Preview production build
-npm run lint             # ESLint
+npm run lint             # ESLint — see caveat below, this is slow
 npm run format           # Prettier
 ./node_modules/.bin/tsc --noEmit   # Type check (bare `npx tsc` can resolve the wrong package)
 npx cap sync android     # Sync web build to Android
+
+# Security-rule tests (the repo's only automated test suite)
+export JAVA_HOME="C:\\Program Files\\Android\\Android Studio\\jbr"   # the emulator needs a JDK
+npm run test:rules       # boots the Firestore emulator and runs tests/firestore.rules.test.ts
+npm run test             # vitest alone, ONLY with an emulator already listening on 8099
 ```
+
+`npm run lint` measures **over 10 minutes** on this machine and was previously mistaken for a clean run because a short `timeout` kills it silently and prints nothing. Prefer scoping it (`eslint tests vitest.config.ts`) during iteration, and do not report an empty `eslint .` output as "0 problems" without checking the exit code.
 
 ## Known Issues & Constraints
 
@@ -360,6 +369,9 @@ Two full review passes have been made over this codebase after the Firestore re-
 6. **`Intl.Segmenter` is feature-detected** (`src/lib/text.ts`). Older WebViews (< Chrome 87) throw a ReferenceError on bare construction and would white-screen the whole app — the code-point fallback must stay.
 7. **Device notifications are deduplicated by document id + a 90s freshness stamp** (`notifications-store.ts`). Removing the freshness check makes every listener (re)attach replay the entire unread history into the notification shade.
 8. **Message/Full-stats actions are gated on `isFriend`** (`app.user.$friendId.tsx`). The rules deny chats/messages to non-friends; un-gating the buttons resurrects a dead-end chat whose send fails with a misleading "check your connection".
+9. **`chats/{pairId}/messages` create checks pair membership**, not just `fromUid == request.auth.uid`. The read rule always checked membership; create did not, which let any signed-in user append a message into a friends' thread (found by `tests/firestore.rules.test.ts`, fixed in M1). Keep both rules symmetrical — a create rule that is looser than its read rule is a hole, not a convenience.
+10. **Every activity window is `FLAG_SECURE`, set in `MainActivity.onCreate` before `super.onCreate()` and never cleared.** ChatZ has one window, so there is no per-screen policy to narrow it; do not "optimize" it by toggling the flag from JS, which would make the client the arbiter of its own protection. Known gaps by design: the Google account picker, Android Settings screens and the system installer are separate windows and cannot be covered, and the flag does not stop an external camera.
+11. **Notification text is `VISIBILITY_PRIVATE` with a sanitized `publicVersion` on both posting paths** (`VibeStatsPlugin.notify` and `ChatzPushService`). Set it on the *builder*, not the channel: an existing channel's lock-screen setting can never be edited in place, so a channel-only change silently does nothing on every installed device.
 
 ### CL-1 · CRITICAL (deploy): `firebase.json` did not publish the security rules
 `firebase.json` referenced only `firestore.indexes.json`. A `firebase deploy --only firestore` would publish indexes but never `firestore.rules`, leaving the live rules untouched — if the project was created in locked mode, **every** Firestore read/write fails. Fixed by adding `"rules": "firestore.rules"`. Verified sane defaults elsewhere: `firestore.indexes.json` contains exactly the two search composites; both search queries in `profile-repo.searchProfiles` match them.
