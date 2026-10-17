@@ -197,6 +197,18 @@ describe("routing and refusal before any storage call", () => {
     expect(await res.json()).toEqual({ ok: false, error: "storage-unconfigured" });
   });
 
+  it("answers JSON when the service account cannot be used at all", async () => {
+    // A missing SA_JSON used to escape as a Workers 1102 HTML error page: the
+    // token exchange sat outside every handler's try, and the app's upload UI
+    // cannot read HTML.
+    const res = await worker.fetch(req("POST", "/files/begin", { fileId: "fileA0001" }), {
+      FILES: {},
+    });
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ ok: false, error: "worker-misconfigured" });
+    expect(res.headers.get("content-type")).toContain("application/json");
+  });
+
   it("still answers the health check", async () => {
     const res = await worker.fetch(req("GET", "/"), {});
     expect(await res.json()).toEqual({ ok: true, service: "chatz-push" });

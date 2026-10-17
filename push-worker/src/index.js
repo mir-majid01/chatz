@@ -206,7 +206,16 @@ export default {
         // otherwise look like a client bug to whoever is reading the app.
         return Response.json({ ok: false, error: "storage-unconfigured" }, { status: 503 });
       }
-      const adminToken = await getAccessToken(env);
+      let adminToken;
+      try {
+        adminToken = await getAccessToken(env);
+      } catch {
+        // A missing or dead SA_JSON, or a refused token exchange. Outside this
+        // try it would surface as a Workers 1102 error page, and the app can do
+        // nothing with HTML — the upload UI needs a code it can show.
+        console.error("files: token exchange failed");
+        return Response.json({ ok: false, error: "worker-misconfigured" }, { status: 500 });
+      }
       return await handleFiles(request, env, adminToken);
     }
     return Response.json({ ok: true, service: "chatz-push" });
