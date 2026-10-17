@@ -453,34 +453,34 @@ describe("shared files", () => {
   it("is created only by the sender, for a friend, within the cap", async () => {
     await assertSucceeds(
       files(A)
-        .doc("fA0001")
-        .set(meta(A, B, "fA0001")),
+        .doc("fileA0001")
+        .set(meta(A, B, "fileA0001")),
     );
     // Writing another user's document id, or claiming to be them, is refused even
     // though the metadata otherwise looks perfect.
     await assertFails(
       files(A)
-        .doc("fA0002")
-        .set({ ...meta(A, B, "fA0002"), senderUid: B }),
+        .doc("fileA0002")
+        .set({ ...meta(A, B, "fileA0002"), senderUid: B }),
     );
     await assertSucceeds(
       files(B)
-        .doc("fB0003")
-        .set(meta(B, A, "fB0003")),
+        .doc("fileB0003")
+        .set(meta(B, A, "fileB0003")),
     ); // reverse direction is equally legal
     // Not friends: nothing to share yet, and no way to fake it here.
     await assertFails(
       files(OUTSIDER)
-        .doc("fO0001")
-        .set(meta(OUTSIDER, A, "fO0001")),
+        .doc("fileO0001")
+        .set(meta(OUTSIDER, A, "fileO0001")),
     );
   });
 
   it("refuses an oversize, malformed or extra-field upload declaration", async () => {
     const at = (over: Record<string, unknown>) =>
       files(A)
-        .doc("fA1001")
-        .set({ ...meta(A, B, "fA1001"), ...over });
+        .doc("fileA1001")
+        .set({ ...meta(A, B, "fileA1001"), ...over });
     await assertFails(at({ declaredSize: 262_144_001 })); // one byte over 250 MiB
     await assertFails(at({ declaredSize: 0 }));
     await assertFails(at({ declaredSize: -5 }));
@@ -492,50 +492,88 @@ describe("shared files", () => {
     await assertFails(at({ state: "ready" })); // 'ready' is the Worker's answer, not a claim
     await assertFails(at({ actualSize: 1 })); // unknown field
     await assertFails(at({ mimeType: "x" }));
-    await assertFails(at({ key: "files/someone-else/fA1001" }));
+    await assertFails(at({ key: "files/someone-else/fileA1001" }));
     await assertFails(at({ createdAt: ts(Date.now() + 60_000) })); // must be server time
     await assertSucceeds(
       files(A)
-        .doc("fA1002")
-        .set({ ...meta(A, B, "fA1002"), fileName: "réport (final).pdf" }),
+        .doc("fileA1002")
+        .set({ ...meta(A, B, "fileA1002"), fileName: "réport (final).pdf" }),
     );
     // The boundary itself: exactly 250 MiB is accepted, so the refusals above are
     // the cap doing its job and not a side effect of another check. Each accepted
-    // case needs its OWN document id — once fA1001 exists, writing it again is an
+    // case needs its OWN document id — once fileA1001 exists, writing it again is an
     // update, and updates are denied for every client by design.
     await assertSucceeds(
       files(A)
-        .doc("fA1003")
-        .set({ ...meta(A, B, "fA1003"), declaredSize: 262_144_000 }),
+        .doc("fileA1003")
+        .set({ ...meta(A, B, "fileA1003"), declaredSize: 262_144_000 }),
+    );
+  });
+
+  it("refuses a document id the upload endpoints could not use", async () => {
+    // The Worker accepts [A-Za-z0-9_]{8,40}. A document it would turn away must
+    // not be createable either, or the sender holds a file they can never finish
+    // uploading — and an unbounded id is an unbounded R2 key.
+    await assertFails(
+      files(A)
+        .doc("fileA1")
+        .set(meta(A, B, "fileA1")),
+    ); // 6 chars
+    await assertFails(
+      files(A)
+        .doc("file-A-0001")
+        .set(meta(A, B, "file-A-0001")),
+    ); // punctuation
+    await assertFails(
+      files(A)
+        .doc("f".repeat(41))
+        .set(meta(A, B, "f".repeat(41))),
+    );
+    // Both ends of the legal range (8 chars and 40), so the refusals above are
+    // the shape and not an unrelated check.
+    await assertSucceeds(
+      files(A)
+        .doc("fileA888")
+        .set(meta(A, B, "fileA888")),
+    );
+    await assertSucceeds(
+      files(A)
+        .doc("f".repeat(40))
+        .set(meta(A, B, "f".repeat(40))),
     );
   });
 
   it("allows no client update at all, and only the sender may delete", async () => {
     await assertSucceeds(
       files(A)
-        .doc("fA2001")
-        .set(meta(A, B, "fA2001")),
+        .doc("fileA2001")
+        .set(meta(A, B, "fileA2001")),
     );
-    await assertFails(files(A).doc("fA2001").update({ state: "ready" }));
-    await assertFails(files(A).doc("fA2001").update({ actualSize: 999_999_999 }));
-    await assertFails(files(B).doc("fA2001").update({ state: "ready" }));
+    await assertFails(files(A).doc("fileA2001").update({ state: "ready" }));
+    await assertFails(files(A).doc("fileA2001").update({ actualSize: 999_999_999 }));
+    await assertFails(files(B).doc("fileA2001").update({ state: "ready" }));
     // The recipient must not be able to make a file disappear on the sender.
-    await assertFails(files(B).doc("fA2001").delete());
-    await assertSucceeds(files(A).doc("fA2001").delete());
+    await assertFails(files(B).doc("fileA2001").delete());
+    await assertSucceeds(files(A).doc("fileA2001").delete());
   });
 
   it("shows a file to its recipient only once the Worker marks it ready", async () => {
     await seed((d) =>
       d
         .collection("files")
-        .doc("fA3001")
-        .set({ ...meta(A, B, "fA3001"), actualSize: 1024, etag: "abc", readyAt: ts(Date.now()) }),
+        .doc("fileA3001")
+        .set({
+          ...meta(A, B, "fileA3001"),
+          actualSize: 1024,
+          etag: "abc",
+          readyAt: ts(Date.now()),
+        }),
     );
-    await assertSucceeds(files(A).doc("fA3001").get()); // sender sees their own, pending or not
-    await assertFails(files(B).doc("fA3001").get()); // still 'pending'
-    await assertFails(db(OUTSIDER).collection("files").doc("fA3001").get());
-    await seed((d) => d.collection("files").doc("fA3001").update({ state: "ready" }));
-    await assertSucceeds(files(B).doc("fA3001").get());
+    await assertSucceeds(files(A).doc("fileA3001").get()); // sender sees their own, pending or not
+    await assertFails(files(B).doc("fileA3001").get()); // still 'pending'
+    await assertFails(db(OUTSIDER).collection("files").doc("fileA3001").get());
+    await seed((d) => d.collection("files").doc("fileA3001").update({ state: "ready" }));
+    await assertSucceeds(files(B).doc("fileA3001").get());
   });
 
   it("lists only for the uploader, so a recipient reads a shared file by id", async () => {
@@ -543,12 +581,12 @@ describe("shared files", () => {
       Promise.all([
         d
           .collection("files")
-          .doc("fA4001")
-          .set({ ...meta(A, B, "fA4001"), state: "ready" }),
+          .doc("fileA4001")
+          .set({ ...meta(A, B, "fileA4001"), state: "ready" }),
         d
           .collection("files")
-          .doc("fA4002")
-          .set(meta(A, B, "fA4002")),
+          .doc("fileA4002")
+          .set(meta(A, B, "fileA4002")),
       ]),
     );
     // The uploader's scoped list is provable from the query alone.
@@ -563,9 +601,9 @@ describe("shared files", () => {
     await assertDenied(db(OUTSIDER).collection("files").where("senderUid", "==", A).get());
     // What the client does instead: the chat message carries the id, and `get`
     // still enforces both state and friendship.
-    await assertSucceeds(db(B).collection("files").doc("fA4001").get());
-    await assertFails(db(B).collection("files").doc("fA4002").get());
-    await assertFails(db(OUTSIDER).collection("files").doc("fA4001").get());
+    await assertSucceeds(db(B).collection("files").doc("fileA4001").get());
+    await assertFails(db(B).collection("files").doc("fileA4002").get());
+    await assertFails(db(OUTSIDER).collection("files").doc("fileA4001").get());
   });
 
   it("revokes a recipient the moment the friendship ends", async () => {
@@ -582,15 +620,111 @@ describe("shared files", () => {
         .set({ members: [D, E], createdAt: SV() });
       await d
         .collection("files")
-        .doc("fD5001")
-        .set({ ...meta(D, E, "fD5001"), state: "ready" });
+        .doc("fileD5001")
+        .set({ ...meta(D, E, "fileD5001"), state: "ready" });
     });
-    await assertSucceeds(db(E).collection("files").doc("fD5001").get());
+    await assertSucceeds(db(E).collection("files").doc("fileD5001").get());
     await seed((d) => d.collection("friendships").doc(pair).delete());
-    await assertFails(db(E).collection("files").doc("fD5001").get());
+    await assertFails(db(E).collection("files").doc("fileD5001").get());
     // Unfriending revokes the recipient, never the owner.
-    await assertSucceeds(db(D).collection("files").doc("fD5001").get());
-    await seed((d) => d.collection("files").doc("fD5001").delete());
+    await assertSucceeds(db(D).collection("files").doc("fileD5001").get());
+    await seed((d) => d.collection("files").doc("fileD5001").delete());
+  });
+
+  it("reaches the recipient only as a reference on a message in its own thread", async () => {
+    // A finished file A -> B, plus the decoys the rule has to tell apart.
+    await seed((d) =>
+      Promise.all([
+        d
+          .collection("files")
+          .doc("fileA6001")
+          .set({ ...meta(A, B, "fileA6001"), state: "ready" }),
+        d
+          .collection("files")
+          .doc("fileA6002")
+          .set({ ...meta(A, B, "fileA6002"), state: "ready" }),
+        d
+          .collection("files")
+          .doc("fileA6003")
+          .set(meta(A, B, "fileA6003")), // still pending
+        d
+          .collection("files")
+          .doc("fileA6004")
+          .set({ ...meta(A, C, "fileA6004"), state: "ready" }), // shared to a different chat
+      ]),
+    );
+    const msgs = (uid: string) => db(uid).collection("chats").doc(PAIR).collection("messages");
+    const link = (over: Record<string, unknown> = {}) => ({
+      fromUid: A,
+      text: "",
+      createdAt: SV(),
+      clientAt: Date.now(),
+      fileId: "fileA6001",
+      ...over,
+    });
+
+    await assertSucceeds(msgs(A).doc("mB6001").set(link()));
+    await assertSucceeds(
+      msgs(A)
+        .doc("mB6002")
+        .set(link({ text: "the report" })),
+    ); // captioned
+    // A plain text message must still work: the two statements on this path are a
+    // union, so adding the file branch cannot have narrowed the old rule.
+    await assertSucceeds(
+      msgs(B)
+        .doc("mB6003")
+        .set({ fromUid: B, text: "thanks", createdAt: SV(), clientAt: Date.now() }),
+    );
+    // Not mine to announce, not finished, not addressed to this pair, not real.
+    await assertFails(
+      msgs(B)
+        .doc("mB6004")
+        .set(link({ fromUid: B })),
+    );
+    await assertFails(
+      msgs(A)
+        .doc("mB6005")
+        .set(link({ fileId: "fileA6003" })),
+    );
+    await assertFails(
+      msgs(A)
+        .doc("mB6006")
+        .set(link({ fileId: "fileA6004" })),
+    );
+    await assertDenied(
+      msgs(A)
+        .doc("mB6007")
+        .set(link({ fileId: "noSuchFile" })),
+    );
+    await assertDenied(
+      msgs(A)
+        .doc("mB6008")
+        .set(link({ fileId: "" })),
+    ); // no text either
+    // The exact field set, in both directions.
+    await assertFails(
+      msgs(A)
+        .doc("mB6009")
+        .set(link({ actualSize: 1024 })),
+    );
+    await assertFails(
+      msgs(A)
+        .doc("mB6010")
+        .set({ fromUid: A, createdAt: SV(), clientAt: Date.now(), fileId: "fileA6001" }),
+    );
+    // An oversized caption is refused even when the file reference is perfect.
+    await assertFails(
+      msgs(A)
+        .doc("mB6011")
+        .set(link({ text: "x".repeat(2001) })),
+    );
+    // And a stranger still cannot write into this pair's thread at all.
+    await assertFails(
+      msgs(OUTSIDER)
+        .doc("mB6012")
+        .set(link({ fromUid: OUTSIDER })),
+    );
   });
 });
 

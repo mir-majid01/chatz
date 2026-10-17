@@ -14,6 +14,17 @@
     // needs, and each run stays inside the free plan's 10 ms CPU budget.
     "crons": ["*/30 * * * *"]
   },
+  // The bucket must exist before this Worker can deploy:
+  //   wrangler r2 bucket create chatz-files
+  // Binding rather than presigned URL, so that the size cap, the ownership check
+  // and the friendship check all happen in code instead of in a URL the app
+  // cannot revoke — and so that no storage credential ever reaches a device.
+  "r2_buckets": [
+    {
+      "binding": "FILES",
+      "bucket_name": "chatz-files"
+    }
+  ],
   "observability": {
     "enabled": true
   }

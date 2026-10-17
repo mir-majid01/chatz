@@ -309,6 +309,43 @@ service cloud.firestore {
 
         allow update, delete: if false;
       }
+
+      // The SAME path again, for file messages. Firestore rules union the
+      // statements, and the two `hasOnly` sets are disjoint, so exactly one
+      // branch can ever be satisfied by a given document — and the text-only
+      // rule above stays byte-identical (no regression surface). The alternative,
+      // one expression with a ternary, risks evaluating the branch that was not
+      // taken: `&&` and `||` here do not reliably short-circuit, and
+      // `get(...).data.senderUid` on a file id that is an empty string aborts.
+      //
+      // Why the link lives on the message: `list` on /files is sender-only (a
+      // recipient's query is not provable), so the recipient cannot go looking
+      // for their incoming files. The message carries the id, and `get` does the
+      // real authorising.
+      match /messages/{messageId} {
+        allow create: if signedIn()
+          && (request.auth.uid == pairId.split("_")[0] || request.auth.uid == pairId.split("_")[1])
+          && request.resource.data.fromUid == request.auth.uid
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.clientAt is int
+          && exists(/databases/$(database)/documents/friendships/$(pairId))
+          // A caption is optional, the reference is not.
+          && request.resource.data.text is string
+          && request.resource.data.text.size() <= 2000
+          && request.resource.data.fileId is string
+          && request.resource.data.keys().hasAll(['fromUid', 'text', 'createdAt', 'clientAt', 'fileId'])
+          && request.resource.data.keys().hasOnly(['fromUid', 'text', 'createdAt', 'clientAt', 'fileId'])
+          // The file must be finished, mine, and addressed to the other member of
+          // this exact pair — so a file cannot be re-pointed at a third chat.
+          && get(/databases/$(database)/documents/files/$(request.resource.data.fileId)).data.senderUid
+              == request.auth.uid
+          && get(/databases/$(database)/documents/files/$(request.resource.data.fileId)).data.recipientUid
+              == (request.auth.uid == pairId.split("_")[0]
+                    ? pairId.split("_")[1]
+                    : pairId.split("_")[0])
+          && get(/databases/$(database)/documents/files/$(request.resource.data.fileId)).data.state
+              == 'ready';
+      }
     }
 
     // -------------------------------------------------------------- shared files
@@ -360,6 +397,10 @@ service cloud.firestore {
         && request.resource.data.declaredSize is int
         && request.resource.data.declaredSize > 0
         && request.resource.data.declaredSize <= 262144000
+        // The same id shape the Worker's endpoints accept. A document the upload
+        // endpoints refuse would be createable but permanently unuploadable, and
+        // an unbounded id is an unbounded R2 key.
+        && fileId.matches('^[A-Za-z0-9_]{8,40}$')
         && request.resource.data.key == 'files/' + request.auth.uid + '/' + fileId
         && request.resource.data.createdAt == request.time
         && request.resource.data.keys().hasOnly([

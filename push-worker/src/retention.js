@@ -30,12 +30,17 @@ const TARGETS = [
   { label: "comments", kind: "group", id: "comments" },
   { label: "reactions", kind: "group", id: "reactions" },
   { label: "messages", kind: "group", id: "messages" },
+  // File metadata is only half the record. The bytes live in R2 and outlive a
+  // deleted document, so this target is skipped unless the caller can delete
+  // objects: removing the metadata first would strand the file with nothing
+  // pointing at it, which is the opposite of retention.
+  { label: "files", kind: "collection", id: "files", needsObjects: true },
 ];
 
 const iso = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
 
 /**
- * Run one structured query and return `{ path, createdMs }` for each hit.
+ * Run one structured query and return `{ path, created, fields }` for each hit.
  * `document.fields.createdAt.timestampValue` is what the delete needs; the REST
  * response is a stream of newline-delimited JSON objects, one per document.
  */
@@ -79,9 +84,30 @@ async function queryExpired(base, token, target, cutoffMs, limit) {
     if (!doc?.name) continue;
     const created = doc.fields?.createdAt?.timestampValue;
     if (!created) continue; // no server stamp → leave it, reported as a gap
-    out.push({ path: doc.name.split("/documents/")[1] ?? doc.name, created });
+    out.push({
+      path: doc.name.split("/documents/")[1] ?? doc.name,
+      created,
+      fields: doc.fields ?? {},
+    });
   }
   return out;
+}
+
+/**
+ * The R2 key for a file document, rebuilt from the path rather than read from
+ * the `key` field.
+ *
+ * The stored key is a string a document once had written to it under whatever
+ * rules were live at the time; the path is what Firestore is actually holding.
+ * Deleting by the stored value would let one bad document point the sweep at
+ * another user's object, so the derived form is the only one used.
+ */
+export function objectKeyFor(path, fields) {
+  const m = /^files\/([A-Za-z0-9_]{8,40})$/.exec(path);
+  if (!m) return null;
+  const sender = fields?.senderUid?.stringValue ?? "";
+  if (!/^[A-Za-z0-9_-]{12,40}$/.test(sender)) return null;
+  return `files/${sender}/${m[1]}`;
 }
 
 async function deleteDocs(base, token, paths) {
@@ -102,13 +128,25 @@ async function deleteDocs(base, token, paths) {
 /**
  * One bounded pass. Returns counts only — never document contents, because
  * messages and notification text are user content and must not reach logs.
+ *
+ * `deleteObject` is optional: without it the file metadata is reported and left
+ * alone. Byte deletion happens *before* the document goes, so a crash between the
+ * two leaves an object with a document pointing at it (the next sweep finishes
+ * the job) rather than an orphan nobody can find.
  */
-export async function runRetention({ base, token, now = Date.now(), dryRun = true, limit = DEFAULT_BATCH }) {
+export async function runRetention({
+  base,
+  token,
+  now = Date.now(),
+  dryRun = true,
+  limit = DEFAULT_BATCH,
+  deleteObject = null,
+}) {
   const cutoff = now - DAY_MS;
   const report = { dryRun, cutoff: iso(cutoff), targets: [] };
 
   for (const target of TARGETS) {
-    const entry = { label: target.label, found: 0, deleted: 0, error: null };
+    const entry = { label: target.label, found: 0, deleted: 0, skipped: 0, error: null };
     try {
       const docs = await queryExpired(base, token, target, cutoff, limit);
       entry.found = docs.length;
@@ -116,8 +154,35 @@ export async function runRetention({ base, token, now = Date.now(), dryRun = tru
         report.targets.push(entry);
         continue;
       }
+      if (target.needsObjects && !deleteObject) {
+        entry.error = "no-object-deleter";
+        entry.skipped = docs.length;
+        report.targets.push(entry);
+        continue;
+      }
       if (dryRun) {
-        entry.deleted = 0;
+        report.targets.push(entry);
+        continue;
+      }
+
+      if (target.needsObjects) {
+        const paths = [];
+        for (const d of docs) {
+          const key = objectKeyFor(d.path, d.fields);
+          if (key) {
+            try {
+              await deleteObject(key);
+            } catch {
+              // One object that would not go must not stop the metadata sweep:
+              // the bucket lifecycle expires the byte anyway, and the document is
+              // the thing readers actually see.
+              entry.skipped += 1;
+              continue;
+            }
+          }
+          paths.push(d.path);
+        }
+        entry.deleted = await deleteDocs(base, token, paths);
       } else {
         entry.deleted = await deleteDocs(
           base,
@@ -133,6 +198,7 @@ export async function runRetention({ base, token, now = Date.now(), dryRun = tru
 
   report.totalFound = report.targets.reduce((a, t) => a + t.found, 0);
   report.totalDeleted = report.targets.reduce((a, t) => a + t.deleted, 0);
+  report.totalSkipped = report.targets.reduce((a, t) => a + t.skipped, 0);
   return report;
 }
 

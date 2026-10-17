@@ -1,27 +1,31 @@
 /**
- * ChatZ push worker — the one bridge between "a notification doc was created"
- * and FCM HTTP v1, without a Blaze plan.
+ * ChatZ worker — the one bridge between "a notification doc was created" and FCM
+ * HTTP v1, and between "a file was shared" and the bytes in R2. Neither is
+ * possible on a Spark plan without a server, and this is the server.
  *
- * Flow: the sender's app POSTs { notifId } after the doc lands in Firestore.
- * The worker then treats the DATABASE as the payload authority — it reads the
- * notification doc itself (so a caller can forge nothing), reads the
- * recipient's device token from their owner-only private doc, sends one
- * data-only FCM message, and stamps pushedAt back onto the doc. That stamp is
- * also the dedupe marker: a second ping for the same doc is a no-op, and the
- * recipient's in-app listener skips any doc that carries it.
+ * Push flow: the sender's app POSTs { notifId } after the doc lands in Firestore.
+ * The worker treats the DATABASE as the payload authority — it reads the
+ * notification doc itself (so a caller can forge nothing), reads the recipient's
+ * device token from their owner-only private doc, sends one data-only FCM
+ * message, and stamps pushedAt back onto the doc. That stamp is also the dedupe
+ * marker: a second ping for the same doc is a no-op, and the recipient's in-app
+ * listener skips any doc that carries it.
+ *
+ * File flow: /files/* in src/files.js. Same admin token, same rule — the database
+ * answers, the caller's claims are only ever a request.
  *
  * Secrets (wrangler secret put):
  *   SA_JSON  — the chatz-push service-account key JSON, verbatim.
  *
  * Vars (wrangler.jsonc): CLEANUP_DRY_RUN ("false" to actually delete),
  * RETENTION_BATCH. The `scheduled` handler runs the 24-hour retention sweep.
+ * Bindings: FILES — the R2 bucket that holds file contents.
  */
 
 import { runRetention, RETENTION_DEFAULT_BATCH } from "./retention.js";
+import { handleFiles } from "./files.js";
+import { FCM_SEND, FS_BASE, fsGet, fsPatch, str } from "./fs.js";
 
-const PROJECT_ID = "dropscope-b588a";
-const FS_BASE = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents`;
-const FCM_SEND = `https://fcm.googleapis.com/v1/projects/${PROJECT_ID}/messages:send`;
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const SCOPE = "https://www.googleapis.com/auth/cloud-platform";
 
@@ -34,7 +38,10 @@ const b64url = (buf) =>
     .replace(/=+$/, "");
 
 const pemToDer = (pem) => {
-  const b64 = pem.split("\n").filter((l) => !l.startsWith("-----")).join("");
+  const b64 = pem
+    .split("\n")
+    .filter((l) => !l.startsWith("-----"))
+    .join("");
   const bin = atob(b64);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
@@ -55,10 +62,22 @@ async function getAccessToken(env) {
   const header = b64url(new TextEncoder().encode(JSON.stringify({ alg: "RS256", typ: "JWT" })));
   const claims = b64url(
     new TextEncoder().encode(
-      JSON.stringify({ iss: sa.client_email, scope: SCOPE, aud: TOKEN_URL, exp: now + 3600, iat: now }),
+      JSON.stringify({
+        iss: sa.client_email,
+        scope: SCOPE,
+        aud: TOKEN_URL,
+        exp: now + 3600,
+        iat: now,
+      }),
     ),
   );
-  const sig = b64url(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(`${header}.${claims}`)));
+  const sig = b64url(
+    await crypto.subtle.sign(
+      "RSASSA-PKCS1-v1_5",
+      key,
+      new TextEncoder().encode(`${header}.${claims}`),
+    ),
+  );
   const res = await fetch(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -69,28 +88,6 @@ async function getAccessToken(env) {
   cachedToken = { value: tok.access_token, expiresAt: Date.now() + (tok.expires_in - 120) * 1000 };
   return cachedToken.value;
 }
-
-async function fsGet(path, token) {
-  const res = await fetch(`${FS_BASE}/${path}`, { headers: { Authorization: `Bearer ${token}` } });
-  if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`fs read ${path}: ${res.status}`);
-  return res.json();
-}
-
-async function fsPatch(path, token, fields) {
-  const q = Object.keys(fields).map((k) => `updateMask.fieldPaths=${k}`).join("&");
-  const res = await fetch(`${FS_BASE}/${path}?${q}`, {
-    method: "PATCH",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ fields }),
-  });
-  if (!res.ok) throw new Error(`fs patch ${path}: ${res.status}`);
-  return res.json();
-}
-
-/** Firestore REST value extraction — only the field shapes ChatZ writes. */
-const str = (doc, key) => doc?.fields?.[key]?.stringValue ?? "";
-const boolFalse = (doc, key) => doc?.fields?.[key]?.booleanValue === false;
 
 async function handlePush(request, env) {
   let notifId;
@@ -113,12 +110,16 @@ async function handlePush(request, env) {
   if (notif.fields?.pushedAt?.timestampValue) {
     return Response.json({ ok: true, skipped: "already" });
   }
-  if (notif.fields?.expiresAt?.timestampValue && new Date(notif.fields.expiresAt.timestampValue) < new Date()) {
+  if (
+    notif.fields?.expiresAt?.timestampValue &&
+    new Date(notif.fields.expiresAt.timestampValue) < new Date()
+  ) {
     return Response.json({ ok: true, skipped: "expired" });
   }
 
   const toUid = str(notif, "toUid");
-  if (!/^[A-Za-z0-9_-]{12,40}$/.test(toUid)) return Response.json({ ok: false, error: "bad toUid" }, { status: 400 });
+  if (!/^[A-Za-z0-9_-]{12,40}$/.test(toUid))
+    return Response.json({ ok: false, error: "bad toUid" }, { status: 400 });
 
   const priv = await fsGet(`users/${toUid}/private/data`, token);
   const fcmToken = str(priv, "fcmToken");
@@ -157,7 +158,9 @@ async function handlePush(request, env) {
   if (!send.ok) {
     if (send.status === 400 && /UNREGISTERED/.test(sendBody)) {
       // Stale token: clear it so future pushes skip fast; the app re-registers.
-      await fsPatch(`users/${toUid}/private/data`, token, { fcmToken: { stringValue: "" } }).catch(() => {});
+      await fsPatch(`users/${toUid}/private/data`, token, { fcmToken: { stringValue: "" } }).catch(
+        () => {},
+      );
       return Response.json({ ok: true, skipped: "unregistered" });
     }
     console.error("fcm send failed", send.status, sendBody.slice(0, 300));
@@ -179,8 +182,11 @@ export default {
       return new Response(null, {
         headers: {
           "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type",
+          // PUT carries an upload part, GET carries a download. Authorization is
+          // the Firebase ID token the file endpoints verify.
+          "Access-Control-Allow-Methods": "POST, PUT, GET, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type, Authorization, Range",
+          "Access-Control-Expose-Headers": "Content-Disposition, Content-Range, Accept-Ranges",
           "Access-Control-Max-Age": "86400",
         },
       });
@@ -192,6 +198,16 @@ export default {
         console.error("push worker error", err?.message);
         return Response.json({ ok: false, error: "internal" }, { status: 500 });
       }
+    }
+    if (url.pathname.startsWith("/files/")) {
+      if (!env.FILES) {
+        // The bucket binding is configuration, not code. Say so instead of
+        // throwing inside the first storage call: a missing binding would
+        // otherwise look like a client bug to whoever is reading the app.
+        return Response.json({ ok: false, error: "storage-unconfigured" }, { status: 503 });
+      }
+      const adminToken = await getAccessToken(env);
+      return await handleFiles(request, env, adminToken);
     }
     return Response.json({ ok: true, service: "chatz-push" });
   },
@@ -210,10 +226,14 @@ export default {
             token,
             dryRun: env.CLEANUP_DRY_RUN !== "false",
             limit: Number(env.RETENTION_BATCH) || RETENTION_DEFAULT_BATCH,
+            deleteObject: env.FILES ? (key) => env.FILES.delete(key) : null,
           });
           console.log(
             `retention dryRun=${report.dryRun} found=${report.totalFound} deleted=${report.totalDeleted} ` +
-              report.targets.map((t) => `${t.label}:${t.found}/${t.deleted}${t.error ? "!err" : ""}`).join(" "),
+              `skipped=${report.totalSkipped} ` +
+              report.targets
+                .map((t) => `${t.label}:${t.found}/${t.deleted}${t.error ? "!err" : ""}`)
+                .join(" "),
           );
         } catch (err) {
           console.error("retention failed", String(err?.message ?? err).slice(0, 200));
